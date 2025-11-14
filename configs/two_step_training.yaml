@@ -1,0 +1,142 @@
+# Two-Step Training Configuration for Dyna3DGR
+#
+# This configuration file defines parameters for the two-step training pipeline:
+#   Step 1: Train Gaussian representation only (static reconstruction)
+#   Step 2: Train complete dynamic model (with deformation)
+
+# ============================================================
+# Step 1: Gaussian Representation Only
+# ============================================================
+step1:
+  # Training parameters
+  max_iterations: 10000           # Total iterations for Step 1
+  log_interval: 10                # Log every N iterations
+  save_interval: 1000             # Save checkpoint every N iterations
+  
+  # Model parameters
+  num_gaussians: 5000             # Initial number of 3D Gaussians
+  feature_dim: 1                  # Feature dimension (1 for grayscale)
+  
+  # Initialization
+  init_from_segmentation: true    # Initialize from segmentation mask
+  foreground_labels: [1, 2, 3]    # RV, MYO, LV
+  
+  # Rendering
+  use_volume_renderer: true       # Complete 3D volume rendering
+  chunk_size: 1000                # Chunk size for rendering
+  
+  # Gaussian densification
+  grad_threshold: 0.0002          # Gradient threshold for densification
+  opacity_threshold: 0.01         # Opacity threshold for pruning
+  densify_interval: 500           # Densify every N iterations
+  densify_start_iter: 500         # Start densification at iteration N
+  densify_stop_iter: 8000         # Stop densification at iteration N
+  
+  # Learning rates (Gaussians only)
+  lr_xyz: 1.6e-4                  # Gaussian positions
+  lr_scale: 5.0e-3                # Gaussian scales
+  lr_rotation: 1.0e-3             # Gaussian rotations
+  lr_opacity: 5.0e-2              # Gaussian opacities
+  lr_features: 2.5e-3             # Gaussian features
+  
+  # Learning rate scheduler
+  lr_scheduler: exponential       # exponential, step, or cosine
+  lr_gamma: 0.99                  # Decay factor for exponential scheduler
+  
+  # Loss weights (static reconstruction)
+  reconstruction_weight: 1.0      # Reconstruction loss
+  regularization_weight: 0.01     # Regularization loss
+  
+  # Optimization
+  grad_clip: 1.0                  # Gradient clipping threshold (0 to disable)
+
+# ============================================================
+# Step 2: Complete Dynamic Model
+# ============================================================
+step2:
+  # Training parameters
+  max_iterations: 10000           # Total iterations for Step 2
+  log_interval: 10                # Log every N iterations
+  save_interval: 1000             # Save checkpoint every N iterations
+  
+  # Model parameters (loaded from Step 1)
+  num_control_nodes: 5000         # Number of control nodes
+  k_nearest: 4                    # K for Linear Blend Skinning
+  
+  # Deformation network
+  spatial_freq: 10                # Spatial positional encoding frequency
+  temporal_freq: 6                # Temporal positional encoding frequency
+  hidden_dim: 256                 # Hidden layer dimension
+  num_layers: 8                   # Number of MLP layers
+  
+  # Rendering
+  use_volume_renderer: true       # Complete 3D volume rendering
+  chunk_size: 1000                # Chunk size for rendering
+  
+  # Gaussian densification (continue from Step 1)
+  grad_threshold: 0.0002          # Gradient threshold for densification
+  opacity_threshold: 0.01         # Opacity threshold for pruning
+  densify_interval: 500           # Densify every N iterations
+  densify_start_iter: 500         # Start densification at iteration N
+  densify_stop_iter: 8000         # Stop densification at iteration N
+  
+  # Learning rates (fine-tuning Gaussians + training dynamic components)
+  # Gaussian LRs are 10x lower than Step 1 for fine-tuning
+  lr_xyz: 1.6e-5                  # Gaussian positions (fine-tune)
+  lr_scale: 5.0e-4                # Gaussian scales (fine-tune)
+  lr_rotation: 1.0e-4             # Gaussian rotations (fine-tune)
+  lr_opacity: 5.0e-3              # Gaussian opacities (fine-tune)
+  lr_features: 2.5e-4             # Gaussian features (fine-tune)
+  
+  # Dynamic component LRs
+  lr_control_nodes: 1.6e-4        # Control node positions
+  lr_deformation: 1.0e-4          # Deformation network
+  
+  # Loss weights (dynamic model)
+  reconstruction_weight: 1.0      # Reconstruction loss
+  temporal_weight: 0.1            # Temporal consistency loss
+  regularization_weight: 0.01     # Regularization loss
+  cycle_weight: 0.1               # Cycle consistency loss
+  
+  # Optimization
+  grad_clip: 1.0                  # Gradient clipping threshold (0 to disable)
+
+# ============================================================
+# Common Parameters
+# ============================================================
+# Data preprocessing
+image_size: [128, 128, 32]        # H, W, D (after preprocessing)
+
+# Device
+device: cuda                      # cuda or cpu
+
+# Random seed
+seed: 42                          # Random seed for reproducibility
+
+# ============================================================
+# Training Strategy Notes
+# ============================================================
+# 
+# Step 1 (Gaussian Representation):
+#   - Goal: Establish a high-quality static reconstruction of the ED frame
+#   - Duration: ~10,000 iterations (~5-10 minutes)
+#   - Output: Pre-trained Gaussians with good coverage of cardiac structures
+#   - Benefits:
+#     * Stable initialization for Step 2
+#     * Faster convergence in Step 2
+#     * Better final quality
+# 
+# Step 2 (Complete Dynamic Model):
+#   - Goal: Learn temporal deformation while maintaining reconstruction quality
+#   - Duration: ~10,000 iterations (~10-15 minutes)
+#   - Input: Pre-trained Gaussians from Step 1
+#   - Output: Complete dynamic model with deformation network
+#   - Benefits:
+#     * Avoids local minima from random initialization
+#     * More stable training
+#     * Higher quality motion tracking
+# 
+# Total Training Time: ~20,000 iterations (~15-25 minutes per patient)
+# 
+# This is more stable than single-stage training and often produces
+# better results, especially for complex cardiac motion patterns.
