@@ -88,7 +88,27 @@ python -c "import dyna3dgr; print('Installation successful!')"
 
 ### 准备数据
 
-本项目使用 [ACDC数据集](https://www.creatis.insa-lyon.fr/Challenge/acdc/)。请先下载数据集并按以下结构组织：
+本项目使用 [ACDC数据集](https://www.creatis.insa-lyon.fr/Challenge/acdc/)。
+
+#### 1. 下载数据集
+
+访问 [ACDC Challenge 官网](https://www.creatis.insa-lyon.fr/Challenge/acdc/) 下载数据集。
+
+#### 2. 预处理数据
+
+使用提供的预处理脚本：
+
+```bash
+python scripts/preprocess_data.py \
+    --input_dir /path/to/raw/ACDC \
+    --output_dir data/ACDC \
+    --target_spacing 1.5 1.5 10.0 \
+    --target_size 256 256 \
+    --normalize \
+    --extract_points
+```
+
+预处理后的数据结构：
 
 ```
 data/ACDC/
@@ -98,6 +118,15 @@ data/ACDC/
 │   └── ...
 ├── patient002/
 └── ...
+```
+
+#### 3. 测试数据加载器
+
+```bash
+python scripts/test_dataloader.py \
+    --data_root data/ACDC \
+    --split train \
+    --num_samples 3
 ```
 
 ### 训练模型
@@ -158,6 +187,7 @@ Dyna3DGR/
 
 - [安装指南](docs/installation.md)
 - [使用教程](docs/usage.md)
+- [数据加载指南](docs/data_loading.md)
 - [架构说明](docs/architecture.md)
 - [API文档](docs/api.md)
 
