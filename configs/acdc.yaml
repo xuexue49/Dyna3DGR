@@ -1,0 +1,92 @@
+# Configuration for ACDC dataset training
+
+# Model configuration
+model:
+  # 3D Gaussian parameters
+  gaussian:
+    num_points: 5000        # Start with fewer points for faster training
+    feature_dim: 1          # Grayscale intensity
+    init_scale: 0.01
+    init_opacity: 0.5
+  
+  # Deformation network parameters
+  deformation:
+    spatial_freq: 10        # Spatial positional encoding frequency
+    temporal_freq: 6        # Temporal positional encoding frequency
+    hidden_dim: 256
+    num_layers: 8
+
+# Training configuration
+training:
+  # Optimization
+  num_epochs: 50
+  batch_size: 2             # Small batch size for memory efficiency
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  
+  # Learning rate scheduling
+  lr_scheduler:
+    type: "exponential"     # exponential, step, or cosine
+    gamma: 0.95
+    step_size: 10
+  
+  # Loss weights
+  loss_weights:
+    reconstruction: 1.0
+    temporal_consistency: 0.1
+    regularization: 0.01
+    cyclic_consistency: 0.05
+  
+  # Gaussian densification and pruning
+  densify:
+    enabled: true
+    start_iter: 500
+    interval: 100
+    grad_threshold: 0.0002
+    max_points: 50000       # Maximum number of Gaussians
+  
+  prune:
+    enabled: true
+    start_iter: 1000
+    interval: 100
+    opacity_threshold: 0.01
+  
+  # Checkpointing
+  checkpoint:
+    save_interval: 5        # Save every N epochs
+    keep_last: 3            # Keep last N checkpoints
+  
+  # Logging
+  logging:
+    log_interval: 10        # Log every N iterations
+    tensorboard: true
+    wandb: false
+
+# Data configuration
+data:
+  dataset: "acdc"
+  data_root: "./data/ACDC"
+  
+  # Image preprocessing
+  image_size: [256, 256]
+  normalize: true
+  augmentation: true
+  
+  # Temporal parameters
+  num_frames: 10            # Sample 10 frames per sequence
+  frame_sampling: "uniform"
+  
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+
+# Hardware configuration
+hardware:
+  device: "cuda"
+  mixed_precision: false    # Disable for now
+  num_gpus: 1
+  distributed: false
+
+# Reproducibility
+seed: 42
+deterministic: true

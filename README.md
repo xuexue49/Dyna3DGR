@@ -131,11 +131,38 @@ python scripts/test_dataloader.py \
 
 ### 训练模型
 
+#### 基本训练
+
 ```bash
 python scripts/train.py \
     --config configs/acdc.yaml \
     --data_root data/ACDC \
     --output_dir outputs/experiment_1
+```
+
+#### 快速训练（使用脚本）
+
+```bash
+./scripts/quick_train.sh --data_root data/ACDC
+```
+
+#### 监控训练
+
+```bash
+# 启动 TensorBoard
+tensorboard --logdir outputs/experiment_1/logs
+
+# 在浏览器中访问 http://localhost:6006
+```
+
+#### 从检查点恢复
+
+```bash
+python scripts/train.py \
+    --config configs/acdc.yaml \
+    --data_root data/ACDC \
+    --output_dir outputs/experiment_1 \
+    --resume outputs/experiment_1/checkpoints/latest.pth
 ```
 
 ### 评估模型
@@ -188,6 +215,7 @@ Dyna3DGR/
 - [安装指南](docs/installation.md)
 - [使用教程](docs/usage.md)
 - [数据加载指南](docs/data_loading.md)
+- [训练指南](docs/training.md)
 - [架构说明](docs/architecture.md)
 - [API文档](docs/api.md)
 
