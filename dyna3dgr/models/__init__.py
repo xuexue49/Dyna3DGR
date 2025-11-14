@@ -21,6 +21,11 @@ from .deformation_network import (
     MLP,
 )
 
+from .control_nodes import (
+    ControlNodes,
+    initialize_control_nodes_from_gaussians,
+)
+
 __all__ = [
     "Gaussian3D",
     "initialize_gaussians_from_point_cloud",
@@ -30,4 +35,6 @@ __all__ = [
     "ControlNodeMotionField",
     "PositionalEncoder",
     "MLP",
+    "ControlNodes",
+    "initialize_control_nodes_from_gaussians",
 ]
