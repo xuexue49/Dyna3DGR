@@ -26,6 +26,10 @@ from .control_nodes import (
     initialize_control_nodes_from_gaussians,
 )
 
+from .densification import (
+    GaussianDensificationController,
+)
+
 __all__ = [
     "Gaussian3D",
     "initialize_gaussians_from_point_cloud",
@@ -37,4 +41,5 @@ __all__ = [
     "MLP",
     "ControlNodes",
     "initialize_control_nodes_from_gaussians",
+    "GaussianDensificationController",
 ]
