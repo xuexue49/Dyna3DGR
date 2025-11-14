@@ -1,0 +1,121 @@
+# Default configuration for Dyna3DGR
+
+# Model configuration
+model:
+  # 3D Gaussian parameters
+  gaussian:
+    num_points: 10000
+    feature_dim: 1
+    init_scale: 0.01
+    init_opacity: 0.5
+  
+  # Deformation network parameters
+  deformation:
+    spatial_freq: 10
+    temporal_freq: 6
+    hidden_dim: 256
+    num_layers: 8
+  
+  # Control nodes (if using control node motion field)
+  control_nodes:
+    enabled: false
+    num_nodes: 100
+    init_radius: 0.1
+
+# Training configuration
+training:
+  # Optimization
+  num_epochs: 100
+  batch_size: 4
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  
+  # Learning rate scheduling
+  lr_scheduler:
+    type: "exponential"  # or "step", "cosine"
+    gamma: 0.95
+    step_size: 10
+  
+  # Loss weights
+  loss_weights:
+    reconstruction: 1.0
+    temporal_consistency: 0.1
+    regularization: 0.01
+    cyclic_consistency: 0.05
+  
+  # Gaussian densification and pruning
+  densify:
+    enabled: true
+    start_iter: 500
+    interval: 100
+    grad_threshold: 0.0002
+    max_points: 100000
+  
+  prune:
+    enabled: true
+    start_iter: 1000
+    interval: 100
+    opacity_threshold: 0.01
+  
+  # Checkpointing
+  checkpoint:
+    save_interval: 10  # epochs
+    keep_last: 5
+  
+  # Logging
+  logging:
+    log_interval: 10  # iterations
+    tensorboard: true
+    wandb: false
+
+# Data configuration
+data:
+  dataset: "acdc"
+  data_root: "./data/ACDC"
+  split:
+    train: 0.7
+    val: 0.15
+    test: 0.15
+  
+  # Image preprocessing
+  image_size: [256, 256]
+  normalize: true
+  augmentation: true
+  
+  # Temporal parameters
+  num_frames: 20
+  frame_sampling: "uniform"  # or "random"
+  
+  # Data loading
+  num_workers: 4
+  pin_memory: true
+
+# Rendering configuration
+rendering:
+  resolution: [256, 256]
+  near: 0.1
+  far: 10.0
+  background_color: [0, 0, 0]
+
+# Evaluation configuration
+evaluation:
+  metrics:
+    - "dice"
+    - "hausdorff"
+    - "tracking_error"
+    - "psnr"
+    - "ssim"
+  
+  save_visualizations: true
+  visualization_interval: 5  # epochs
+
+# Hardware configuration
+hardware:
+  device: "cuda"
+  mixed_precision: true
+  num_gpus: 1
+  distributed: false
+
+# Reproducibility
+seed: 42
+deterministic: true
