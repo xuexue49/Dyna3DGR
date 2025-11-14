@@ -39,8 +39,13 @@ from dyna3dgr.models import (
 )
 from dyna3dgr.utils.loss import Dyna3DGRLoss
 from dyna3dgr.utils.knn import knn_search_auto
-from dyna3dgr.data import PatientDataset
-from dyna3dgr.rendering import Medical2DSliceRenderer
+from dyna3dgr.data import (
+    PatientDataset,
+    initialize_from_segmentation,
+    initialize_from_image,
+    initialize_uniform_grid,
+)
+from dyna3dgr.rendering import Medical2DSliceRenderer, VolumeRenderer, render_volume
 
 
 def parse_args():
@@ -188,16 +193,39 @@ class Dyna3DGRTrainer:
         print("\nInitializing models...")
         
         # Initialize 3D Gaussians from ED frame
-        # TODO: Initialize from segmentation mask (future improvement)
         num_gaussians = self.config.get('num_gaussians', 5000)
         
-        # For now, initialize from uniform grid
-        # In future: use initialize_from_segmentation()
-        image_shape = self.ed_frame['image'].shape
-        grid_points = self._create_uniform_grid(image_shape, num_gaussians)
+        # Try to initialize from segmentation if available
+        if 'segmentation' in self.ed_frame and self.ed_frame['segmentation'] is not None:
+            print("  Initializing from segmentation mask...")
+            try:
+                gaussian_positions = initialize_from_segmentation(
+                    segmentation=self.ed_frame['segmentation'],
+                    num_gaussians=num_gaussians,
+                    foreground_labels=[1, 2, 3],  # RV, MYO, LV
+                    normalize=True,
+                    add_noise=True,
+                )
+            except Exception as e:
+                print(f"  Warning: Failed to initialize from segmentation: {e}")
+                print("  Falling back to uniform grid initialization")
+                image_shape = self.ed_frame['image'].shape
+                gaussian_positions = initialize_uniform_grid(
+                    shape=image_shape,
+                    num_gaussians=num_gaussians,
+                    normalize=True,
+                )
+        else:
+            print("  No segmentation available, using uniform grid initialization")
+            image_shape = self.ed_frame['image'].shape
+            gaussian_positions = initialize_uniform_grid(
+                shape=image_shape,
+                num_gaussians=num_gaussians,
+                normalize=True,
+            )
         
         self.gaussians = initialize_gaussians_from_point_cloud(
-            points=grid_points,
+            points=gaussian_positions,
             num_gaussians=num_gaussians,
             feature_dim=1,  # Intensity
         ).to(self.device)
@@ -256,12 +284,23 @@ class Dyna3DGRTrainer:
         """Setup renderer."""
         print("\nInitializing renderer...")
         
-        self.renderer = Medical2DSliceRenderer(
-            image_size=tuple(self.config.get('image_size', [128, 128, 32])[:2]),
-            chunk_size=self.config.get('chunk_size', 1000),
-        ).to(self.device)
+        # Choose renderer based on configuration
+        use_volume_renderer = self.config.get('use_volume_renderer', True)
         
-        print(f"  ✓ Initialized Medical2DSliceRenderer")
+        if use_volume_renderer:
+            self.renderer = VolumeRenderer(
+                image_size=tuple(self.config.get('image_size', [128, 128, 32])),
+                chunk_size=self.config.get('chunk_size', 1000),
+            ).to(self.device)
+            print(f"  ✓ Initialized VolumeRenderer (complete 3D rendering)")
+        else:
+            self.renderer = Medical2DSliceRenderer(
+                image_size=tuple(self.config.get('image_size', [128, 128, 32])[:2]),
+                chunk_size=self.config.get('chunk_size', 1000),
+            ).to(self.device)
+            print(f"  ✓ Initialized Medical2DSliceRenderer (single slice)")
+        
+        self.use_volume_renderer = use_volume_renderer
     
     def setup_optimizers(self):
         """
@@ -523,37 +562,72 @@ class Dyna3DGRTrainer:
             optimizer.zero_grad()
         
         # Render all frames
-        rendered_images = []
-        for t_idx in range(T):
-            t = timestamps[t_idx:t_idx+1]  # [1]
+        if self.use_volume_renderer:
+            # Complete volume rendering
+            rendered_volumes = []
+            for t_idx in range(T):
+                t = timestamps[t_idx:t_idx+1]  # [1]
+                
+                # Forward pass with deformation
+                deformed_xyz, deformed_scale, deformed_features = self.forward_with_deformation(t)
+                
+                # Render complete volume
+                rendered_volume = self.renderer(
+                    xyz=deformed_xyz,
+                    scale=deformed_scale,
+                    rotation=self.gaussians.rotation,
+                    opacity=self.gaussians.opacity,
+                    features=deformed_features,
+                )  # [H, W, D, F]
+                
+                rendered_volumes.append(rendered_volume)
             
-            # Forward pass with deformation
-            deformed_xyz, deformed_scale, deformed_features = self.forward_with_deformation(t)
+            rendered_volumes = torch.stack(rendered_volumes, dim=0)  # [T, H, W, D, F]
             
-            # Render (simplified: render middle slice)
-            # TODO: Render all slices
+            # Compute loss on complete volumes
+            gt_volumes = images.unsqueeze(-1)  # [T, H, W, D, 1]
+        else:
+            # Single slice rendering (for debugging/faster training)
+            rendered_images = []
             slice_idx = images.shape[3] // 2
             
-            rendered_slice = self.renderer(
-                xyz=deformed_xyz,
-                scale=deformed_scale,
-                rotation=self.gaussians.rotation,
-                opacity=self.gaussians.opacity,
-                features=deformed_features,
-                slice_position=slice_idx / images.shape[3],
-            )
+            for t_idx in range(T):
+                t = timestamps[t_idx:t_idx+1]  # [1]
+                
+                # Forward pass with deformation
+                deformed_xyz, deformed_scale, deformed_features = self.forward_with_deformation(t)
+                
+                # Render middle slice
+                rendered_slice = self.renderer(
+                    xyz=deformed_xyz,
+                    scale=deformed_scale,
+                    rotation=self.gaussians.rotation,
+                    opacity=self.gaussians.opacity,
+                    features=deformed_features,
+                    slice_position=slice_idx / images.shape[3],
+                )
+                
+                rendered_images.append(rendered_slice)
             
-            rendered_images.append(rendered_slice)
+            rendered_images = torch.stack(rendered_images, dim=0)  # [T, H, W]
+            gt_images = images[:, :, :, slice_idx]  # [T, H, W]
         
-        rendered_images = torch.stack(rendered_images, dim=0)  # [T, H, W]
-        
-        # Compute loss (simplified: use middle slice)
-        gt_images = images[:, :, :, slice_idx]  # [T, H, W]
-        
-        loss_dict = self.loss_fn(
-            rendered=rendered_images.unsqueeze(1),  # [T, 1, H, W]
-            target=gt_images.unsqueeze(1),  # [T, 1, H, W]
-        )
+        # Compute loss
+        if self.use_volume_renderer:
+            # Reshape for loss computation: [T, H, W, D, F] -> [T*D, F, H, W]
+            T, H, W, D, F = rendered_volumes.shape
+            rendered_flat = rendered_volumes.permute(0, 3, 4, 1, 2).reshape(T*D, F, H, W)
+            gt_flat = gt_volumes.permute(0, 3, 4, 1, 2).reshape(T*D, F, H, W)
+            
+            loss_dict = self.loss_fn(
+                rendered=rendered_flat,
+                target=gt_flat,
+            )
+        else:
+            loss_dict = self.loss_fn(
+                rendered=rendered_images.unsqueeze(1),  # [T, 1, H, W]
+                target=gt_images.unsqueeze(1),  # [T, 1, H, W]
+            )
         
         total_loss = loss_dict['total']
         

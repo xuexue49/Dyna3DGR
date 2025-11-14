@@ -15,6 +15,11 @@ from .patient_loader import (
     create_patient_dataloader,
     collate_patient_sequence,
 )
+from .initialization import (
+    initialize_from_segmentation,
+    initialize_from_image,
+    initialize_uniform_grid,
+)
 
 __all__ = [
     "ACDCDataset",
@@ -24,4 +29,7 @@ __all__ = [
     "get_patient_ids",
     "create_patient_dataloader",
     "collate_patient_sequence",
+    "initialize_from_segmentation",
+    "initialize_from_image",
+    "initialize_uniform_grid",
 ]

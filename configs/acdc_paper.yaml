@@ -28,6 +28,10 @@ image_size: [128, 128, 32]  # H, W, D (after center crop)
 # Note: Paper uses 1.5×1.5×3.15mm resolution
 # This should be handled in preprocessing
 
+# Initialization
+init_from_segmentation: true  # true: init from segmentation, false: uniform grid
+foreground_labels: [1, 2, 3]  # RV, MYO, LV
+
 # Gaussian densification (from paper)
 grad_threshold: 0.0002  # Gradient threshold for densification
 opacity_threshold: 0.01  # Opacity threshold for pruning
@@ -44,6 +48,7 @@ regularization_weight: 0.01  # Regularization loss
 cycle_weight: 0.1  # Cycle consistency loss
 
 # Rendering
+use_volume_renderer: true  # true: render all slices, false: render single slice (faster)
 chunk_size: 1000  # Chunk size for efficient rendering
 
 # Logging
