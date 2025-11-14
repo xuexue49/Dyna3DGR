@@ -216,7 +216,8 @@ Dyna3DGR/
 - [使用教程](docs/usage.md)
 - [数据加载指南](docs/data_loading.md)
 - [训练指南](docs/training.md)
-- [渲染系统](docs/rendering.md) ⭐ 新增
+- [渲染系统](docs/rendering.md)
+- [可视化和评估](docs/visualization.md) ⭐ 新增
 - [架构说明](docs/architecture.md)
 - [API文档](docs/api.md)
 
