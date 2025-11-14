@@ -1,0 +1,63 @@
+# Dyna3DGR Configuration (Paper-compliant)
+# 
+# This configuration matches the parameters described in the paper:
+# "Dyna3DGR: 4D Cardiac Motion Tracking with Dynamic 3D Gaussian Representation"
+
+# Random seed
+seed: 42
+
+# Training parameters (from paper)
+max_iterations: 20000  # Total training iterations (~11 minutes on RTX 3090)
+stage1_iterations: 1000  # Stage 1: Optimize Gaussians only
+control_nodes_start_iter: 5000  # Start optimizing control nodes from this iteration
+
+# Model parameters
+num_gaussians: 5000  # Number of 3D Gaussians
+num_control_nodes: 5000  # Number of control nodes (max = num_gaussians)
+control_node_radius: 0.1  # Initial radius for RBF kernels
+k_nearest: 4  # Number of nearest control nodes for Linear Blend Skinning
+
+# Deformation network
+spatial_freq: 10  # Spatial positional encoding frequency
+temporal_freq: 6  # Temporal positional encoding frequency
+hidden_dim: 256  # Hidden layer dimension
+num_layers: 8  # Number of MLP layers
+
+# Data preprocessing (from paper)
+image_size: [128, 128, 32]  # H, W, D (after center crop)
+# Note: Paper uses 1.5×1.5×3.15mm resolution
+# This should be handled in preprocessing
+
+# Gaussian densification (from paper)
+grad_threshold: 0.0002  # Gradient threshold for densification
+opacity_threshold: 0.01  # Opacity threshold for pruning
+scale_threshold: 0.1  # Scale threshold for splitting vs cloning
+densify_interval: 500  # Densification interval (every 500 iterations)
+densify_start_iter: 500  # Start densification from 500th iteration
+densify_end_iter: null  # No end limit
+max_gaussians: null  # No maximum limit
+
+# Loss weights
+reconstruction_weight: 1.0  # L1 reconstruction loss
+temporal_weight: 0.1  # Temporal consistency loss
+regularization_weight: 0.01  # Regularization loss
+cycle_weight: 0.1  # Cycle consistency loss
+
+# Rendering
+chunk_size: 1000  # Chunk size for efficient rendering
+
+# Logging
+log_interval: 10  # Log every N iterations
+save_interval: 1000  # Save checkpoint every N iterations
+
+# Optimizer parameters (from paper)
+# These are hardcoded in the training script:
+# - Gaussian xyz: lr=1e-4
+# - Gaussian features: lr=5e-3
+# - Gaussian rotation: lr=1e-4
+# - Gaussian scale: lr=1e-4
+# - Gaussian opacity: lr=1e-4
+# - Control nodes: lr=1e-4 (from iter 5000)
+# - Deformation network: lr=1e-6
+# - Adam: β=(0.9, 0.999), ε=1e-15
+# - LR decay: Exponential from 1e-4 to 1e-7

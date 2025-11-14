@@ -1,9 +1,14 @@
-#!/usr/bin/env python3
 """
 Training script for Dyna3DGR.
 
-This script trains the Dyna3DGR model for 4D cardiac motion tracking.
-Integrates ACDC data loader, Gaussian3D model, DeformationNetwork, and loss functions.
+This script implements the complete training pipeline as described in the paper:
+- Per-case optimization (single patient training)
+- Two-stage training strategy
+- Control nodes with Linear Blend Skinning
+- Gaussian densification and pruning
+- Precise learning rate scheduling
+
+Paper: Dyna3DGR: 4D Cardiac Motion Tracking with Dynamic 3D Gaussian Representation
 """
 
 import os
@@ -19,36 +24,45 @@ import numpy as np
 from pathlib import Path
 import time
 import json
+from typing import Dict, Optional, Tuple
 
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from dyna3dgr.models import Gaussian3D, DeformationNetwork, initialize_gaussians_from_point_cloud
+from dyna3dgr.models import (
+    Gaussian3D,
+    DeformationNetwork,
+    ControlNodes,
+    initialize_gaussians_from_point_cloud,
+    initialize_control_nodes_from_gaussians,
+    GaussianDensificationController,
+)
 from dyna3dgr.utils.loss import Dyna3DGRLoss
-from dyna3dgr.data import create_acdc_dataloader
-from dyna3dgr.rendering import EfficientGaussianRenderer
+from dyna3dgr.utils.knn import knn_search_auto
+from dyna3dgr.data import PatientDataset
+from dyna3dgr.rendering import Medical2DSliceRenderer
 
 
 def parse_args():
     """Parse command line arguments."""
-    parser = argparse.ArgumentParser(description='Train Dyna3DGR')
+    parser = argparse.ArgumentParser(description='Train Dyna3DGR (Per-Case Optimization)')
     
     parser.add_argument(
         '--config',
         type=str,
-        default='configs/default.yaml',
+        default='configs/acdc.yaml',
         help='Path to configuration file'
     )
     parser.add_argument(
-        '--data_root',
+        '--patient_dir',
         type=str,
         required=True,
-        help='Path to data root directory'
+        help='Path to single patient directory (per-case optimization)'
     )
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='outputs/experiment',
+        default='outputs/patient',
         help='Path to output directory'
     )
     parser.add_argument(
@@ -60,7 +74,7 @@ def parse_args():
     parser.add_argument(
         '--device',
         type=str,
-        default='cuda',
+        default='cuda' if torch.cuda.is_available() else 'cpu',
         help='Device to use (cuda or cpu)'
     )
     parser.add_argument(
@@ -72,14 +86,14 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_config(config_path):
+def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     return config
 
 
-def setup_directories(output_dir):
+def setup_directories(output_dir: str) -> Path:
     """Create output directories."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -89,7 +103,7 @@ def setup_directories(output_dir):
     return output_dir
 
 
-def set_seed(seed):
+def set_seed(seed: int):
     """Set random seed for reproducibility."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
@@ -99,614 +113,623 @@ def set_seed(seed):
         torch.backends.cudnn.benchmark = False
 
 
-def save_config(config, output_dir):
-    """Save configuration to output directory."""
-    config_file = output_dir / 'config.yaml'
-    with open(config_file, 'w') as f:
-        yaml.dump(config, f, default_flow_style=False)
-
-
-class Trainer:
-    """Trainer class for Dyna3DGR."""
+class Dyna3DGRTrainer:
+    """
+    Trainer for Dyna3DGR with per-case optimization.
     
-    def __init__(self, config, output_dir, device, debug=False):
+    Implements:
+    - Two-stage training (Stage 1: Gaussians only, Stage 2: Joint optimization)
+    - Control nodes with Linear Blend Skinning
+    - Gaussian densification and pruning
+    - Precise learning rate scheduling (as per paper)
+    """
+    
+    def __init__(
+        self,
+        config: dict,
+        patient_dir: str,
+        output_dir: Path,
+        device: str = 'cuda',
+        debug: bool = False,
+    ):
         """
         Initialize trainer.
         
         Args:
             config: Configuration dictionary
-            output_dir: Output directory path
+            patient_dir: Path to patient directory
+            output_dir: Output directory
             device: Device to use
-            debug: Enable debug mode
+            debug: Debug mode flag
         """
         self.config = config
-        self.output_dir = Path(output_dir)
+        self.patient_dir = patient_dir
+        self.output_dir = output_dir
         self.device = device
         self.debug = debug
         
-        # Setup models
+        # Training parameters (from paper)
+        self.max_iterations = config.get('max_iterations', 20000)
+        self.stage1_iterations = config.get('stage1_iterations', 1000)
+        self.control_nodes_start_iter = config.get('control_nodes_start_iter', 5000)
+        
+        # Setup components
+        self.setup_data()
         self.setup_models()
-        
-        # Setup renderer
         self.setup_renderer()
-        
-        # Setup optimizer
-        self.setup_optimizer()
-        
-        # Setup loss
+        self.setup_optimizers()
         self.setup_loss()
-        
-        # Setup logging
+        self.setup_densification()
         self.setup_logging()
         
         # Training state
-        self.epoch = 0
-        self.iteration = 0
+        self.current_iteration = 0
         self.best_loss = float('inf')
-        
-        # Metrics tracking
-        self.train_losses = []
-        self.val_losses = []
     
-    def setup_models(self):
-        """Setup models."""
-        print("Setting up models...")
+    def setup_data(self):
+        """Setup data loading."""
+        print(f"Loading patient data from: {self.patient_dir}")
         
-        # 3D Gaussians
-        self.gaussians = Gaussian3D(
-            num_points=self.config['model']['gaussian']['num_points'],
-            feature_dim=self.config['model']['gaussian']['feature_dim'],
-            init_scale=self.config['model']['gaussian']['init_scale'],
-            init_opacity=self.config['model']['gaussian']['init_opacity'],
-        ).to(self.device)
-        
-        # Deformation network
-        self.deformation_net = DeformationNetwork(
-            spatial_freq=self.config['model']['deformation']['spatial_freq'],
-            temporal_freq=self.config['model']['deformation']['temporal_freq'],
-            hidden_dim=self.config['model']['deformation']['hidden_dim'],
-            num_layers=self.config['model']['deformation']['num_layers'],
-        ).to(self.device)
-        
-        # Count parameters
-        gaussian_params = sum(p.numel() for p in self.gaussians.parameters())
-        deformation_params = sum(p.numel() for p in self.deformation_net.parameters())
-        total_params = gaussian_params + deformation_params
-        
-        print(f"Gaussians: {self.gaussians.num_points} points, {gaussian_params:,} parameters")
-        print(f"Deformation network: {deformation_params:,} parameters")
-        print(f"Total parameters: {total_params:,}")
-    
-    def setup_renderer(self):
-        """Setup Gaussian renderer."""
-        print("Setting up renderer...")
-        
-        # Get image size from config
-        image_size = tuple(self.config['data']['image_size']) + (self.config['data'].get('depth', 10),)
-        
-        # Create efficient Gaussian renderer
-        self.renderer = EfficientGaussianRenderer(
-            image_size=image_size,
-            background_color=0.0,
-            chunk_size=self.config.get('rendering', {}).get('chunk_size', 500),
-            distance_threshold=self.config.get('rendering', {}).get('distance_threshold', 3.0),
-        ).to(self.device)
-        
-        print(f"Renderer: EfficientGaussianRenderer")
-        print(f"  Image size: {image_size}")
-        print(f"  Chunk size: {self.config.get('rendering', {}).get('chunk_size', 500)}")
-    
-    def setup_optimizer(self):
-        """Setup optimizer."""
-        print("Setting up optimizer...")
-        
-        # Combine parameters from both models
-        params = [
-            {
-                'params': self.gaussians.parameters(),
-                'lr': self.config['training']['learning_rate'],
-                'name': 'gaussians'
-            },
-            {
-                'params': self.deformation_net.parameters(),
-                'lr': self.config['training']['learning_rate'],
-                'name': 'deformation'
-            },
-        ]
-        
-        self.optimizer = optim.Adam(
-            params,
-            lr=self.config['training']['learning_rate'],
-            weight_decay=self.config['training']['weight_decay'],
+        self.dataset = PatientDataset(
+            patient_dir=self.patient_dir,
+            image_size=tuple(self.config.get('image_size', [128, 128, 32])),
+            load_segmentation=True,
         )
         
-        # Learning rate scheduler
-        scheduler_type = self.config['training']['lr_scheduler']['type']
-        if scheduler_type == 'exponential':
-            self.scheduler = optim.lr_scheduler.ExponentialLR(
-                self.optimizer,
-                gamma=self.config['training']['lr_scheduler']['gamma'],
-            )
-        elif scheduler_type == 'step':
-            self.scheduler = optim.lr_scheduler.StepLR(
-                self.optimizer,
-                step_size=self.config['training']['lr_scheduler']['step_size'],
-                gamma=self.config['training']['lr_scheduler']['gamma'],
-            )
-        elif scheduler_type == 'cosine':
-            self.scheduler = optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer,
-                T_max=self.config['training']['num_epochs'],
-            )
-        else:
-            self.scheduler = None
+        print(f"  Loaded {len(self.dataset)} frames")
+        print(f"  Image shape: {self.dataset.image_shape}")
         
-        print(f"Optimizer: Adam with lr={self.config['training']['learning_rate']}")
-        print(f"Scheduler: {scheduler_type}")
+        # Get ED frame for initialization
+        self.ed_frame = self.dataset[0]
+        print(f"  ED frame shape: {self.ed_frame['image'].shape}")
+    
+    def setup_models(self):
+        """Setup models: Gaussians, Control Nodes, Deformation Network."""
+        print("\nInitializing models...")
+        
+        # Initialize 3D Gaussians from ED frame
+        # TODO: Initialize from segmentation mask (future improvement)
+        num_gaussians = self.config.get('num_gaussians', 5000)
+        
+        # For now, initialize from uniform grid
+        # In future: use initialize_from_segmentation()
+        image_shape = self.ed_frame['image'].shape
+        grid_points = self._create_uniform_grid(image_shape, num_gaussians)
+        
+        self.gaussians = initialize_gaussians_from_point_cloud(
+            points=grid_points,
+            num_gaussians=num_gaussians,
+            feature_dim=1,  # Intensity
+        ).to(self.device)
+        
+        print(f"  ✓ Initialized {self.gaussians.num_points} Gaussians")
+        
+        # Initialize control nodes from Gaussian positions
+        num_control_nodes = self.config.get('num_control_nodes', num_gaussians)
+        self.control_nodes = initialize_control_nodes_from_gaussians(
+            gaussian_positions=self.gaussians.xyz,
+            num_control_nodes=num_control_nodes,
+            init_radius=self.config.get('control_node_radius', 0.1),
+        ).to(self.device)
+        
+        print(f"  ✓ Initialized {self.control_nodes.num_nodes} control nodes")
+        
+        # Initialize deformation network
+        self.deformation_net = DeformationNetwork(
+            spatial_dim=3,
+            temporal_dim=1,
+            spatial_freq=self.config.get('spatial_freq', 10),
+            temporal_freq=self.config.get('temporal_freq', 6),
+            hidden_dim=self.config.get('hidden_dim', 256),
+            num_layers=self.config.get('num_layers', 8),
+        ).to(self.device)
+        
+        print(f"  ✓ Initialized deformation network")
+        
+        # KNN parameters
+        self.k_nearest = self.config.get('k_nearest', 4)
+    
+    def _create_uniform_grid(self, shape: tuple, num_points: int) -> np.ndarray:
+        """Create uniform grid of points."""
+        # Create grid in normalized space [0, 1]
+        H, W, D = shape
+        
+        # Calculate grid size
+        points_per_dim = int(np.ceil(num_points ** (1/3)))
+        
+        # Create grid
+        x = np.linspace(0, 1, points_per_dim)
+        y = np.linspace(0, 1, points_per_dim)
+        z = np.linspace(0, 1, points_per_dim)
+        
+        xx, yy, zz = np.meshgrid(x, y, z)
+        points = np.stack([xx.ravel(), yy.ravel(), zz.ravel()], axis=-1)
+        
+        # Randomly sample if too many points
+        if len(points) > num_points:
+            indices = np.random.choice(len(points), num_points, replace=False)
+            points = points[indices]
+        
+        return points
+    
+    def setup_renderer(self):
+        """Setup renderer."""
+        print("\nInitializing renderer...")
+        
+        self.renderer = Medical2DSliceRenderer(
+            image_size=tuple(self.config.get('image_size', [128, 128, 32])[:2]),
+            chunk_size=self.config.get('chunk_size', 1000),
+        ).to(self.device)
+        
+        print(f"  ✓ Initialized Medical2DSliceRenderer")
+    
+    def setup_optimizers(self):
+        """
+        Setup optimizers with precise learning rates as per paper.
+        
+        Learning rates (from paper):
+        - Gaussian positions: 1e-4
+        - Features (intensity): 5e-3
+        - Rotation: 1e-4
+        - Scale: 1e-4
+        - Control nodes: 1e-4 (start from iter 5000)
+        - Deformation network: 1e-6
+        
+        Optimizer: Adam with β=(0.9, 0.999), ε=1e-15
+        LR decay: Exponential from 1e-4 to 1e-7
+        """
+        print("\nSetting up optimizers...")
+        
+        # Adam parameters (from paper)
+        adam_betas = (0.9, 0.999)
+        adam_eps = 1e-15
+        
+        self.optimizers = {}
+        self.schedulers = {}
+        
+        # Gaussian position optimizer
+        self.optimizers['xyz'] = optim.Adam(
+            [self.gaussians._xyz],
+            lr=1e-4,
+            betas=adam_betas,
+            eps=adam_eps,
+        )
+        
+        # Gaussian features (intensity) optimizer
+        self.optimizers['features'] = optim.Adam(
+            [self.gaussians._features],
+            lr=5e-3,
+            betas=adam_betas,
+            eps=adam_eps,
+        )
+        
+        # Gaussian rotation optimizer
+        self.optimizers['rotation'] = optim.Adam(
+            [self.gaussians._rotation],
+            lr=1e-4,
+            betas=adam_betas,
+            eps=adam_eps,
+        )
+        
+        # Gaussian scale optimizer
+        self.optimizers['scale'] = optim.Adam(
+            [self.gaussians._scale],
+            lr=1e-4,
+            betas=adam_betas,
+            eps=adam_eps,
+        )
+        
+        # Gaussian opacity optimizer
+        self.optimizers['opacity'] = optim.Adam(
+            [self.gaussians._opacity],
+            lr=1e-4,
+            betas=adam_betas,
+            eps=adam_eps,
+        )
+        
+        # Control nodes optimizer
+        self.optimizers['control_nodes'] = optim.Adam(
+            self.control_nodes.parameters(),
+            lr=1e-4,
+            betas=adam_betas,
+            eps=adam_eps,
+        )
+        
+        # Deformation network optimizer
+        self.optimizers['deformation_net'] = optim.Adam(
+            self.deformation_net.parameters(),
+            lr=1e-6,
+            betas=adam_betas,
+            eps=adam_eps,
+        )
+        
+        # Setup learning rate schedulers (exponential decay: 1e-4 → 1e-7)
+        # gamma = (1e-7 / 1e-4) ^ (1 / max_iterations)
+        gamma = (1e-7 / 1e-4) ** (1.0 / self.max_iterations)
+        
+        for name, optimizer in self.optimizers.items():
+            self.schedulers[name] = optim.lr_scheduler.ExponentialLR(
+                optimizer,
+                gamma=gamma,
+            )
+        
+        print(f"  ✓ Created {len(self.optimizers)} optimizers")
+        print(f"  ✓ LR decay gamma: {gamma:.6f}")
+        print(f"  ✓ LR range: 1e-4 → 1e-7 over {self.max_iterations} iterations")
     
     def setup_loss(self):
         """Setup loss function."""
-        print("Setting up loss function...")
+        print("\nSetting up loss function...")
         
-        self.criterion = Dyna3DGRLoss(
-            recon_weight=self.config['training']['loss_weights']['reconstruction'],
-            temporal_weight=self.config['training']['loss_weights']['temporal_consistency'],
-            reg_weight=self.config['training']['loss_weights']['regularization'],
-            cyclic_weight=self.config['training']['loss_weights']['cyclic_consistency'],
+        self.loss_fn = Dyna3DGRLoss(
+            reconstruction_weight=self.config.get('reconstruction_weight', 1.0),
+            temporal_weight=self.config.get('temporal_weight', 0.1),
+            regularization_weight=self.config.get('regularization_weight', 0.01),
+            cycle_weight=self.config.get('cycle_weight', 0.1),
         ).to(self.device)
         
-        print(f"Loss weights: {self.config['training']['loss_weights']}")
+        print(f"  ✓ Initialized Dyna3DGRLoss")
+    
+    def setup_densification(self):
+        """Setup Gaussian densification controller."""
+        print("\nSetting up densification controller...")
+        
+        self.densification_controller = GaussianDensificationController(
+            grad_threshold=self.config.get('grad_threshold', 0.0002),
+            opacity_threshold=self.config.get('opacity_threshold', 0.01),
+            scale_threshold=self.config.get('scale_threshold', 0.1),
+            densify_interval=self.config.get('densify_interval', 500),
+            densify_start_iter=self.config.get('densify_start_iter', 500),
+            densify_end_iter=self.config.get('densify_end_iter', None),
+            max_gaussians=self.config.get('max_gaussians', None),
+        )
+        
+        print(f"  ✓ Initialized densification controller")
+        print(f"    - Start iteration: {self.densification_controller.densify_start_iter}")
+        print(f"    - Interval: {self.densification_controller.densify_interval}")
     
     def setup_logging(self):
         """Setup logging."""
-        print("Setting up logging...")
+        print("\nSetting up logging...")
         
-        if self.config['training']['logging']['tensorboard']:
-            log_dir = self.output_dir / 'logs'
-            self.writer = SummaryWriter(log_dir)
-            print(f"TensorBoard logging to: {log_dir}")
+        self.writer = SummaryWriter(log_dir=str(self.output_dir / 'logs'))
+        
+        print(f"  ✓ TensorBoard logs: {self.output_dir / 'logs'}")
+    
+    def get_training_stage(self, iteration: int) -> str:
+        """
+        Get current training stage.
+        
+        Stage 1 (0-1000): Optimize Gaussians only
+        Stage 2 (1000-20000): Joint optimization
+        """
+        if iteration < self.stage1_iterations:
+            return 'stage1'
         else:
-            self.writer = None
+            return 'stage2'
     
-    def forward_pass(self, batch):
+    def freeze_parameters(self, stage: str, iteration: int):
         """
-        Forward pass through the model.
+        Freeze/unfreeze parameters based on training stage.
         
-        Args:
-            batch: Batch of data
+        Stage 1 (0-1000):
+          - Optimize: Gaussians (xyz, features, rotation, scale, opacity)
+          - Freeze: Deformation network, Control nodes
         
-        Returns:
-            outputs: Dictionary of outputs
-            losses: Dictionary of losses
+        Stage 2 (1000-20000):
+          - Optimize: Gaussians, Deformation network
+          - Control nodes: Start optimizing from iteration 5000
         """
-        images = batch['images'].to(self.device)  # [B, T, H, W, D]
-        timestamps = batch['timestamps'].to(self.device)  # [B, T]
-        lengths = batch['lengths']  # [B]
+        if stage == 'stage1':
+            # Freeze deformation network and control nodes
+            for param in self.deformation_net.parameters():
+                param.requires_grad = False
+            for param in self.control_nodes.parameters():
+                param.requires_grad = False
         
-        batch_size, max_time = images.shape[:2]
-        
-        # For now, we'll work with a simplified version
-        # In full implementation, this would involve:
-        # 1. Initialize Gaussians from first frame
-        # 2. Apply deformation for each time step
-        # 3. Render images
-        # 4. Compute losses
-        
-        # Placeholder: Compute simple reconstruction loss
-        # Get Gaussian positions
-        gaussian_xyz = self.gaussians.xyz  # [N, 3]
-        gaussian_features = self.gaussians.features  # [N, F]
-        gaussian_opacity = self.gaussians.opacity  # [N, 1]
-        gaussian_scale = self.gaussians.scale  # [N, 3]
-        
-        # Store motion sequence for temporal consistency
-        motion_sequence = []
-        
-        # Process each time step
-        for t in range(max_time):
-            # Get time for this step
-            t_normalized = timestamps[:, t:t+1]  # [B, 1]
+        elif stage == 'stage2':
+            # Unfreeze deformation network
+            for param in self.deformation_net.parameters():
+                param.requires_grad = True
             
-            # Apply deformation
-            deformed_xyz, deformed_alpha = self.deformation_net.apply_deformation(
-                gaussian_xyz,
-                gaussian_opacity,
-                t_normalized[0],  # Use first batch item's time
-            )
-            
-            motion_sequence.append(deformed_xyz.unsqueeze(0))  # [1, N, 3]
-        
-        # Stack motion sequence
-        motion_sequence = torch.cat(motion_sequence, dim=0)  # [T, N, 3]
-        
-        # Render images using Gaussian splatting
-        pred_images = self._render_sequence(
-            motion_sequence,
-            gaussian_features,
-            gaussian_scale,
-            self.gaussians.rotation,
-            gaussian_opacity,
-            batch_size,
-        )
-        
-        # Get initial and final positions for cyclic consistency
-        initial_positions = motion_sequence[0]  # [N, 3]
-        final_positions = motion_sequence[-1]  # [N, 3]
-        
-        # Compute losses
-        losses = self.criterion(
-            pred_images=pred_images,
-            target_images=images,
-            motion_sequence=motion_sequence,
-            scale=gaussian_scale,
-            opacity=gaussian_opacity,
-            initial_positions=initial_positions,
-            final_positions=final_positions,
-        )
-        
-        outputs = {
-            'pred_images': pred_images,
-            'motion_sequence': motion_sequence,
-            'deformed_positions': motion_sequence[-1],
-        }
-        
-        return outputs, losses
+            # Control nodes: start from iteration 5000
+            if iteration >= self.control_nodes_start_iter:
+                for param in self.control_nodes.parameters():
+                    param.requires_grad = True
+            else:
+                for param in self.control_nodes.parameters():
+                    param.requires_grad = False
     
-    def _render_sequence(
+    def forward_with_deformation(
         self,
-        motion_sequence: torch.Tensor,
-        features: torch.Tensor,
-        scales: torch.Tensor,
-        rotations: torch.Tensor,
-        opacities: torch.Tensor,
-        batch_size: int,
-    ) -> torch.Tensor:
+        t: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Render a sequence of images using Gaussian splatting.
+        Forward pass with deformation.
         
         Args:
-            motion_sequence: Deformed Gaussian positions [T, N, 3]
-            features: Gaussian features [N, F]
-            scales: Gaussian scales [N, 3]
-            rotations: Gaussian rotations [N, 4]
-            opacities: Gaussian opacities [N, 1]
-            batch_size: Batch size
+            t: Time [1] or [N, 1]
         
         Returns:
-            rendered_images: Rendered images [B, T, H, W, D]
+            deformed_xyz: [N, 3] deformed positions
+            deformed_scale: [N, 3] deformed scales
+            deformed_features: [N, F] deformed features
         """
-        T, N, _ = motion_sequence.shape
+        # Get canonical Gaussian parameters
+        canonical_xyz = self.gaussians.xyz  # [N, 3]
+        canonical_scale = self.gaussians.scale  # [N, 3]
+        canonical_features = self.gaussians.features  # [N, F]
         
-        # Render each time step
-        rendered_frames = []
-        for t in range(T):
-            # Get positions for this time step
-            positions_t = motion_sequence[t]  # [N, 3]
-            
-            # Render using Gaussian splatting
-            rendered_volume = self.renderer(
-                means=positions_t,
-                scales=scales,
-                rotations=rotations,
-                opacities=opacities,
-                features=features,
-            )  # [H, W, D, F]
-            
-            # Permute to [F, H, W, D] for consistency
-            rendered_volume = rendered_volume.permute(3, 0, 1, 2)
-            
-            rendered_frames.append(rendered_volume)
+        # Stage 1: No deformation
+        if self.get_training_stage(self.current_iteration) == 'stage1':
+            return canonical_xyz, canonical_scale, canonical_features
         
-        # Stack frames: [T, F, H, W, D]
-        rendered_sequence = torch.stack(rendered_frames, dim=0)
+        # Stage 2: Apply deformation via control nodes
+        # 1. Predict control node transformations
+        control_positions = self.control_nodes.positions  # [M, 3]
+        M = control_positions.shape[0]
         
-        # Expand batch dimension and permute to [B, T, H, W, D]
-        # Assuming single feature (grayscale)
-        rendered_images = rendered_sequence[:, 0:1].unsqueeze(0).expand(batch_size, -1, -1, -1, -1)
-        rendered_images = rendered_images.squeeze(2)  # Remove feature dim: [B, T, H, W, D]
+        # Expand time dimension
+        if t.dim() == 0 or (t.dim() == 1 and t.shape[0] == 1):
+            t_expanded = t.expand(M, 1) if t.dim() == 1 else t.unsqueeze(0).expand(M, 1)
+        else:
+            t_expanded = t
         
-        return rendered_images
+        # Predict control node deformations (with stop-gradient on positions)
+        control_delta_xyz, control_alpha = self.deformation_net(
+            control_positions.detach(),  # Stop gradient
+            t_expanded,
+        )
+        
+        # 2. KNN search: Find k nearest control nodes for each Gaussian
+        knn_indices, knn_distances = knn_search_auto(
+            query_points=canonical_xyz,
+            reference_points=control_positions,
+            k=self.k_nearest,
+        )
+        
+        # 3. Linear Blend Skinning: Blend control node transformations to Gaussians
+        gaussian_delta_xyz, gaussian_alpha = self.control_nodes.blend_transformations(
+            control_transformations=(control_delta_xyz, control_alpha),
+            query_points=canonical_xyz,
+            k_nearest_indices=knn_indices,
+        )
+        
+        # 4. Apply transformations
+        deformed_xyz = canonical_xyz + gaussian_delta_xyz
+        deformed_scale = canonical_scale * torch.exp(gaussian_alpha)
+        deformed_features = canonical_features  # Features don't change
+        
+        return deformed_xyz, deformed_scale, deformed_features
     
-    def train_epoch(self, train_loader):
+    def train_iteration(self, batch: dict) -> dict:
         """
-        Train for one epoch.
+        Train one iteration.
         
         Args:
-            train_loader: Training data loader
+            batch: Batch data
         
         Returns:
-            avg_loss: Average loss for the epoch
+            metrics: Dictionary of metrics
         """
-        self.gaussians.train()
-        self.deformation_net.train()
+        # Get data
+        images = batch['image'].to(self.device)  # [T, H, W, D]
+        timestamps = batch['timestamp'].to(self.device)  # [T]
         
-        epoch_losses = {
-            'total': [],
-            'recon': [],
-            'temporal': [],
-            'reg': [],
-            'cyclic': [],
-        }
+        T = images.shape[0]
         
-        pbar = tqdm(train_loader, desc=f"Epoch {self.epoch}")
+        # Zero gradients
+        for optimizer in self.optimizers.values():
+            optimizer.zero_grad()
         
-        for batch_idx, batch in enumerate(pbar):
-            # Forward pass
-            try:
-                outputs, losses = self.forward_pass(batch)
-            except Exception as e:
-                print(f"Error in forward pass: {e}")
-                if self.debug:
-                    raise
-                continue
+        # Render all frames
+        rendered_images = []
+        for t_idx in range(T):
+            t = timestamps[t_idx:t_idx+1]  # [1]
             
-            # Backward pass
-            self.optimizer.zero_grad()
-            losses['total'].backward()
+            # Forward pass with deformation
+            deformed_xyz, deformed_scale, deformed_features = self.forward_with_deformation(t)
             
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(
-                list(self.gaussians.parameters()) + list(self.deformation_net.parameters()),
-                max_norm=1.0
+            # Render (simplified: render middle slice)
+            # TODO: Render all slices
+            slice_idx = images.shape[3] // 2
+            
+            rendered_slice = self.renderer(
+                xyz=deformed_xyz,
+                scale=deformed_scale,
+                rotation=self.gaussians.rotation,
+                opacity=self.gaussians.opacity,
+                features=deformed_features,
+                slice_position=slice_idx / images.shape[3],
             )
             
-            # Optimizer step
-            self.optimizer.step()
-            
-            # Update iteration
-            self.iteration += 1
-            
-            # Record losses
-            for key in epoch_losses.keys():
-                if key in losses:
-                    epoch_losses[key].append(losses[key].item())
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'loss': losses['total'].item(),
-                'recon': losses['recon'].item(),
-            })
-            
-            # Logging
-            if self.writer and self.iteration % self.config['training']['logging']['log_interval'] == 0:
-                for key, value in losses.items():
-                    self.writer.add_scalar(f'train/{key}_loss', value.item(), self.iteration)
-                
-                # Log learning rate
-                self.writer.add_scalar('train/lr', self.optimizer.param_groups[0]['lr'], self.iteration)
-            
-            # Densify and prune Gaussians
-            if self.config['training']['densify']['enabled']:
-                if (self.iteration >= self.config['training']['densify']['start_iter'] and
-                    self.iteration % self.config['training']['densify']['interval'] == 0):
-                    self.gaussians.densify(
-                        grad_threshold=self.config['training']['densify']['grad_threshold'],
-                        max_points=self.config['training']['densify']['max_points'],
-                    )
-            
-            if self.config['training']['prune']['enabled']:
-                if (self.iteration >= self.config['training']['prune']['start_iter'] and
-                    self.iteration % self.config['training']['prune']['interval'] == 0):
-                    self.gaussians.prune(
-                        opacity_threshold=self.config['training']['prune']['opacity_threshold'],
-                    )
-            
-            # Debug mode: only process a few batches
-            if self.debug and batch_idx >= 2:
-                break
+            rendered_images.append(rendered_slice)
         
-        # Compute average losses
-        avg_losses = {key: np.mean(values) if values else 0.0 
-                      for key, values in epoch_losses.items()}
+        rendered_images = torch.stack(rendered_images, dim=0)  # [T, H, W]
         
-        return avg_losses
-    
-    def validate(self, val_loader):
-        """
-        Validate the model.
+        # Compute loss (simplified: use middle slice)
+        gt_images = images[:, :, :, slice_idx]  # [T, H, W]
         
-        Args:
-            val_loader: Validation data loader
+        loss_dict = self.loss_fn(
+            rendered=rendered_images.unsqueeze(1),  # [T, 1, H, W]
+            target=gt_images.unsqueeze(1),  # [T, 1, H, W]
+        )
         
-        Returns:
-            avg_losses: Average validation losses
-        """
-        self.gaussians.eval()
-        self.deformation_net.eval()
+        total_loss = loss_dict['total']
         
-        val_losses = {
-            'total': [],
-            'recon': [],
-            'temporal': [],
-            'reg': [],
-            'cyclic': [],
+        # Backward pass
+        total_loss.backward()
+        
+        # Accumulate gradients for densification
+        if self.gaussians._xyz.grad is not None:
+            self.densification_controller.accumulate_gradients(
+                self.gaussians._xyz.grad
+            )
+        
+        # Gradient clipping
+        torch.nn.utils.clip_grad_norm_(
+            self.gaussians.parameters(),
+            max_norm=1.0,
+        )
+        
+        # Optimizer step (based on training stage)
+        stage = self.get_training_stage(self.current_iteration)
+        
+        # Always optimize Gaussians
+        for name in ['xyz', 'features', 'rotation', 'scale', 'opacity']:
+            self.optimizers[name].step()
+            self.schedulers[name].step()
+        
+        # Stage 2: Also optimize deformation network and control nodes
+        if stage == 'stage2':
+            self.optimizers['deformation_net'].step()
+            self.schedulers['deformation_net'].step()
+            
+            if self.current_iteration >= self.control_nodes_start_iter:
+                self.optimizers['control_nodes'].step()
+                self.schedulers['control_nodes'].step()
+        
+        # Prepare metrics
+        metrics = {
+            'total_loss': total_loss.item(),
+            'stage': stage,
+            'num_gaussians': self.gaussians.num_points,
         }
+        metrics.update({k: v.item() for k, v in loss_dict.items() if k != 'total'})
         
-        with torch.no_grad():
-            for batch_idx, batch in enumerate(tqdm(val_loader, desc="Validation")):
-                try:
-                    outputs, losses = self.forward_pass(batch)
-                except Exception as e:
-                    print(f"Error in validation: {e}")
-                    if self.debug:
-                        raise
-                    continue
-                
-                # Record losses
-                for key in val_losses.keys():
-                    if key in losses:
-                        val_losses[key].append(losses[key].item())
-                
-                # Debug mode: only process a few batches
-                if self.debug and batch_idx >= 2:
-                    break
-        
-        # Compute average losses
-        avg_losses = {key: np.mean(values) if values else 0.0 
-                      for key, values in val_losses.items()}
-        
-        return avg_losses
+        return metrics
     
-    def save_checkpoint(self, is_best=False):
-        """
-        Save checkpoint.
+    def train(self):
+        """Main training loop."""
+        print("\n" + "="*60)
+        print("Starting Training")
+        print("="*60)
+        print(f"Max iterations: {self.max_iterations}")
+        print(f"Stage 1 (Gaussians only): 0-{self.stage1_iterations}")
+        print(f"Stage 2 (Joint optimization): {self.stage1_iterations}-{self.max_iterations}")
+        print(f"Control nodes start: {self.control_nodes_start_iter}")
+        print(f"Device: {self.device}")
+        print("="*60 + "\n")
         
-        Args:
-            is_best: Whether this is the best model so far
-        """
+        # Progress bar
+        pbar = tqdm(range(self.max_iterations), desc='Training')
+        
+        try:
+            for iteration in pbar:
+                self.current_iteration = iteration
+                
+                # Get training stage
+                stage = self.get_training_stage(iteration)
+                
+                # Freeze/unfreeze parameters
+                self.freeze_parameters(stage, iteration)
+                
+                # Get batch (cycle through dataset)
+                batch_idx = iteration % len(self.dataset)
+                batch = self.dataset.get_sequence()
+                
+                # Train iteration
+                metrics = self.train_iteration(batch)
+                
+                # Gaussian densification
+                if self.densification_controller.should_densify(iteration):
+                    num_split, num_cloned, num_pruned = \
+                        self.densification_controller.densify_and_prune(self.gaussians)
+                    
+                    metrics['densify_split'] = num_split
+                    metrics['densify_cloned'] = num_cloned
+                    metrics['densify_pruned'] = num_pruned
+                    
+                    pbar.write(
+                        f"[Iter {iteration}] Densification: "
+                        f"split={num_split}, cloned={num_cloned}, pruned={num_pruned}, "
+                        f"total={self.gaussians.num_points}"
+                    )
+                
+                # Logging
+                if iteration % 10 == 0:
+                    for key, value in metrics.items():
+                        if isinstance(value, (int, float)):
+                            self.writer.add_scalar(f'train/{key}', value, iteration)
+                    
+                    # Log learning rates
+                    for name, optimizer in self.optimizers.items():
+                        lr = optimizer.param_groups[0]['lr']
+                        self.writer.add_scalar(f'lr/{name}', lr, iteration)
+                
+                # Update progress bar
+                pbar.set_postfix({
+                    'loss': f"{metrics['total_loss']:.4f}",
+                    'stage': stage,
+                    'gaussians': self.gaussians.num_points,
+                })
+                
+                # Save checkpoint
+                if iteration % 1000 == 0 and iteration > 0:
+                    self.save_checkpoint(f'iter_{iteration}.pth')
+                
+                # Save best checkpoint
+                if metrics['total_loss'] < self.best_loss:
+                    self.best_loss = metrics['total_loss']
+                    self.save_checkpoint('best.pth')
+        
+        except KeyboardInterrupt:
+            print("\n\nTraining interrupted by user.")
+            self.save_checkpoint('interrupted.pth')
+        
+        finally:
+            # Save final checkpoint
+            self.save_checkpoint('final.pth')
+            self.writer.close()
+            
+            print("\n" + "="*60)
+            print("Training Completed")
+            print("="*60)
+            print(f"Total iterations: {self.current_iteration + 1}")
+            print(f"Best loss: {self.best_loss:.6f}")
+            print(f"Final Gaussians: {self.gaussians.num_points}")
+            print(f"Checkpoints saved to: {self.output_dir / 'checkpoints'}")
+            print("="*60 + "\n")
+    
+    def save_checkpoint(self, filename: str):
+        """Save checkpoint."""
+        checkpoint_path = self.output_dir / 'checkpoints' / filename
+        
         checkpoint = {
-            'epoch': self.epoch,
-            'iteration': self.iteration,
-            'gaussians_state_dict': self.gaussians.state_dict(),
-            'deformation_net_state_dict': self.deformation_net.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
+            'iteration': self.current_iteration,
+            'gaussians': self.gaussians.state_dict(),
+            'control_nodes': self.control_nodes.get_state_dict_with_metadata(),
+            'deformation_net': self.deformation_net.state_dict(),
+            'optimizers': {name: opt.state_dict() for name, opt in self.optimizers.items()},
+            'schedulers': {name: sch.state_dict() for name, sch in self.schedulers.items()},
             'best_loss': self.best_loss,
             'config': self.config,
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
         }
         
-        if self.scheduler is not None:
-            checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
-        
-        # Save regular checkpoint
-        checkpoint_path = self.output_dir / 'checkpoints' / f'checkpoint_epoch_{self.epoch}.pth'
         torch.save(checkpoint, checkpoint_path)
-        
-        # Save best checkpoint
-        if is_best:
-            best_path = self.output_dir / 'checkpoints' / 'best.pth'
-            torch.save(checkpoint, best_path)
-            print(f"✓ Best model saved (loss: {self.best_loss:.6f})")
-        
-        # Save latest checkpoint
-        latest_path = self.output_dir / 'checkpoints' / 'latest.pth'
-        torch.save(checkpoint, latest_path)
-        
-        print(f"Checkpoint saved: {checkpoint_path}")
-        
-        # Clean up old checkpoints (keep only last N)
-        keep_last = self.config['training']['checkpoint']['keep_last']
-        checkpoints = sorted(self.output_dir.glob('checkpoints/checkpoint_epoch_*.pth'))
-        if len(checkpoints) > keep_last:
-            for old_checkpoint in checkpoints[:-keep_last]:
-                old_checkpoint.unlink()
     
-    def load_checkpoint(self, checkpoint_path):
-        """
-        Load checkpoint.
-        
-        Args:
-            checkpoint_path: Path to checkpoint file
-        """
-        print(f"Loading checkpoint from: {checkpoint_path}")
-        
+    def load_checkpoint(self, checkpoint_path: str):
+        """Load checkpoint."""
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        self.gaussians.load_state_dict(checkpoint['gaussians_state_dict'])
-        self.deformation_net.load_state_dict(checkpoint['deformation_net_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.current_iteration = checkpoint['iteration']
+        self.gaussians.load_state_dict(checkpoint['gaussians'])
+        self.control_nodes = ControlNodes.from_state_dict_with_metadata(
+            checkpoint['control_nodes']
+        ).to(self.device)
+        self.deformation_net.load_state_dict(checkpoint['deformation_net'])
         
-        if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        for name, opt in self.optimizers.items():
+            if name in checkpoint['optimizers']:
+                opt.load_state_dict(checkpoint['optimizers'][name])
         
-        self.epoch = checkpoint['epoch']
-        self.iteration = checkpoint['iteration']
-        self.best_loss = checkpoint['best_loss']
-        self.train_losses = checkpoint.get('train_losses', [])
-        self.val_losses = checkpoint.get('val_losses', [])
+        for name, sch in self.schedulers.items():
+            if name in checkpoint['schedulers']:
+                sch.load_state_dict(checkpoint['schedulers'][name])
         
-        print(f"Resumed from epoch {self.epoch}, iteration {self.iteration}")
-    
-    def train(self, train_loader, val_loader):
-        """
-        Main training loop.
+        self.best_loss = checkpoint.get('best_loss', float('inf'))
         
-        Args:
-            train_loader: Training data loader
-            val_loader: Validation data loader
-        """
-        print("\n" + "="*60)
-        print("Starting training...")
-        print("="*60)
-        
-        num_epochs = self.config['training']['num_epochs']
-        start_epoch = self.epoch
-        
-        # Training loop
-        for epoch in range(start_epoch, num_epochs):
-            self.epoch = epoch
-            epoch_start_time = time.time()
-            
-            print(f"\nEpoch {epoch + 1}/{num_epochs}")
-            print("-" * 60)
-            
-            # Train
-            train_losses = self.train_epoch(train_loader)
-            self.train_losses.append(train_losses)
-            
-            # Validate
-            val_losses = self.validate(val_loader)
-            self.val_losses.append(val_losses)
-            
-            # Learning rate scheduling
-            if self.scheduler:
-                self.scheduler.step()
-            
-            # Print epoch summary
-            epoch_time = time.time() - epoch_start_time
-            print(f"\nEpoch {epoch + 1} Summary:")
-            print(f"  Time: {epoch_time:.2f}s")
-            print(f"  Train Loss: {train_losses['total']:.6f}")
-            print(f"    - Reconstruction: {train_losses['recon']:.6f}")
-            print(f"    - Temporal: {train_losses['temporal']:.6f}")
-            print(f"    - Regularization: {train_losses['reg']:.6f}")
-            print(f"    - Cyclic: {train_losses['cyclic']:.6f}")
-            print(f"  Val Loss: {val_losses['total']:.6f}")
-            print(f"  Gaussians: {self.gaussians.num_points} points")
-            print(f"  Learning Rate: {self.optimizer.param_groups[0]['lr']:.6e}")
-            
-            # Logging
-            if self.writer:
-                self.writer.add_scalar('epoch/train_loss', train_losses['total'], epoch)
-                self.writer.add_scalar('epoch/val_loss', val_losses['total'], epoch)
-                self.writer.add_scalar('epoch/lr', self.optimizer.param_groups[0]['lr'], epoch)
-                self.writer.add_scalar('epoch/num_gaussians', self.gaussians.num_points, epoch)
-            
-            # Save checkpoint
-            is_best = val_losses['total'] < self.best_loss
-            if is_best:
-                self.best_loss = val_losses['total']
-            
-            if (epoch + 1) % self.config['training']['checkpoint']['save_interval'] == 0:
-                self.save_checkpoint(is_best=is_best)
-        
-        print("\n" + "="*60)
-        print("Training completed!")
-        print(f"Best validation loss: {self.best_loss:.6f}")
-        print("="*60)
-        
-        # Save final metrics
-        self.save_metrics()
-        
-        if self.writer:
-            self.writer.close()
-    
-    def save_metrics(self):
-        """Save training metrics to JSON."""
-        metrics = {
-            'train_losses': self.train_losses,
-            'val_losses': self.val_losses,
-            'best_loss': self.best_loss,
-            'final_epoch': self.epoch,
-            'final_iteration': self.iteration,
-        }
-        
-        metrics_file = self.output_dir / 'metrics.json'
-        with open(metrics_file, 'w') as f:
-            json.dump(metrics, f, indent=2)
-        
-        print(f"Metrics saved to: {metrics_file}")
+        print(f"Loaded checkpoint from iteration {self.current_iteration}")
 
 
 def main():
@@ -717,86 +740,31 @@ def main():
     # Load configuration
     config = load_config(args.config)
     
-    # Update config with command line arguments
-    config['data']['data_root'] = args.data_root
-    
     # Setup directories
     output_dir = setup_directories(args.output_dir)
     
-    # Save configuration
-    save_config(config, output_dir)
-    
     # Set seed
-    set_seed(config['seed'])
+    set_seed(config.get('seed', 42))
     
-    # Setup device
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-    
-    if torch.cuda.is_available():
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-        print(f"CUDA version: {torch.version.cuda}")
-    
-    # Create data loaders
-    print("\nCreating data loaders...")
-    
-    try:
-        train_loader = create_acdc_dataloader(
-            data_root=config['data']['data_root'],
-            split='train',
-            batch_size=config['training']['batch_size'],
-            num_workers=config['data']['num_workers'],
-            image_size=tuple(config['data']['image_size']),
-            num_frames=config['data']['num_frames'],
-            normalize=config['data']['normalize'],
-            augmentation=config['data']['augmentation'],
-            load_segmentation=True,
-        )
-        
-        val_loader = create_acdc_dataloader(
-            data_root=config['data']['data_root'],
-            split='val',
-            batch_size=config['training']['batch_size'],
-            num_workers=config['data']['num_workers'],
-            image_size=tuple(config['data']['image_size']),
-            num_frames=config['data']['num_frames'],
-            normalize=config['data']['normalize'],
-            augmentation=False,  # No augmentation for validation
-            load_segmentation=True,
-        )
-        
-        print(f"Train dataset: {len(train_loader.dataset)} patients, {len(train_loader)} batches")
-        print(f"Val dataset: {len(val_loader.dataset)} patients, {len(val_loader)} batches")
-        
-    except Exception as e:
-        print(f"Error creating data loaders: {e}")
-        print("\nPlease ensure:")
-        print("1. ACDC data is available at the specified path")
-        print("2. Data has been preprocessed using scripts/preprocess_data.py")
-        print("3. The data directory structure is correct")
-        return
+    # Save configuration
+    with open(output_dir / 'config.yaml', 'w') as f:
+        yaml.dump(config, f)
     
     # Create trainer
-    trainer = Trainer(config, output_dir, device, debug=args.debug)
+    trainer = Dyna3DGRTrainer(
+        config=config,
+        patient_dir=args.patient_dir,
+        output_dir=output_dir,
+        device=args.device,
+        debug=args.debug,
+    )
     
     # Load checkpoint if resuming
     if args.resume:
         trainer.load_checkpoint(args.resume)
     
     # Train
-    try:
-        trainer.train(train_loader, val_loader)
-    except KeyboardInterrupt:
-        print("\n\nTraining interrupted by user")
-        print("Saving checkpoint...")
-        trainer.save_checkpoint(is_best=False)
-        print("Checkpoint saved. You can resume training with --resume")
-    except Exception as e:
-        print(f"\n\nError during training: {e}")
-        if args.debug:
-            raise
-        print("Saving checkpoint...")
-        trainer.save_checkpoint(is_best=False)
+    trainer.train()
 
 
 if __name__ == '__main__':
