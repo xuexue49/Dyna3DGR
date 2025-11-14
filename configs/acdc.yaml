@@ -62,10 +62,16 @@ training:
     tensorboard: true
     wandb: false
 
+# Rendering configuration
+rendering:
+  chunk_size: 500           # Process Gaussians in chunks
+  distance_threshold: 3.0   # Cull distant Gaussians (in std devs)
+
 # Data configuration
 data:
   dataset: "acdc"
   data_root: "./data/ACDC"
+  depth: 10                 # Depth dimension for 3D volumes
   
   # Image preprocessing
   image_size: [256, 256]

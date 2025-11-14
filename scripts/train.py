@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 from dyna3dgr.models import Gaussian3D, DeformationNetwork, initialize_gaussians_from_point_cloud
 from dyna3dgr.utils.loss import Dyna3DGRLoss
 from dyna3dgr.data import create_acdc_dataloader
+from dyna3dgr.rendering import EfficientGaussianRenderer
 
 
 def parse_args():
@@ -126,6 +127,9 @@ class Trainer:
         # Setup models
         self.setup_models()
         
+        # Setup renderer
+        self.setup_renderer()
+        
         # Setup optimizer
         self.setup_optimizer()
         
@@ -172,6 +176,25 @@ class Trainer:
         print(f"Gaussians: {self.gaussians.num_points} points, {gaussian_params:,} parameters")
         print(f"Deformation network: {deformation_params:,} parameters")
         print(f"Total parameters: {total_params:,}")
+    
+    def setup_renderer(self):
+        """Setup Gaussian renderer."""
+        print("Setting up renderer...")
+        
+        # Get image size from config
+        image_size = tuple(self.config['data']['image_size']) + (self.config['data'].get('depth', 10),)
+        
+        # Create efficient Gaussian renderer
+        self.renderer = EfficientGaussianRenderer(
+            image_size=image_size,
+            background_color=0.0,
+            chunk_size=self.config.get('rendering', {}).get('chunk_size', 500),
+            distance_threshold=self.config.get('rendering', {}).get('distance_threshold', 3.0),
+        ).to(self.device)
+        
+        print(f"Renderer: EfficientGaussianRenderer")
+        print(f"  Image size: {image_size}")
+        print(f"  Chunk size: {self.config.get('rendering', {}).get('chunk_size', 500)}")
     
     def setup_optimizer(self):
         """Setup optimizer."""
@@ -296,13 +319,14 @@ class Trainer:
         # Stack motion sequence
         motion_sequence = torch.cat(motion_sequence, dim=0)  # [T, N, 3]
         
-        # Placeholder reconstruction: Use simple intensity projection
-        # In full implementation, this would use differentiable Gaussian splatting
-        pred_images = self._placeholder_render(
-            images,
-            gaussian_xyz,
-            gaussian_features,
+        # Render images using Gaussian splatting
+        pred_images = self._render_sequence(
             motion_sequence,
+            gaussian_features,
+            gaussian_scale,
+            self.gaussians.rotation,
+            gaussian_opacity,
+            batch_size,
         )
         
         # Get initial and final positions for cyclic consistency
@@ -328,28 +352,60 @@ class Trainer:
         
         return outputs, losses
     
-    def _placeholder_render(self, target_images, gaussian_xyz, gaussian_features, motion_sequence):
+    def _render_sequence(
+        self,
+        motion_sequence: torch.Tensor,
+        features: torch.Tensor,
+        scales: torch.Tensor,
+        rotations: torch.Tensor,
+        opacities: torch.Tensor,
+        batch_size: int,
+    ) -> torch.Tensor:
         """
-        Placeholder rendering function.
-        
-        In full implementation, this would use differentiable Gaussian splatting.
-        For now, we return a simple prediction based on target images.
+        Render a sequence of images using Gaussian splatting.
         
         Args:
-            target_images: Target images [B, T, H, W, D]
-            gaussian_xyz: Gaussian positions [N, 3]
-            gaussian_features: Gaussian features [N, F]
-            motion_sequence: Motion sequence [T, N, 3]
+            motion_sequence: Deformed Gaussian positions [T, N, 3]
+            features: Gaussian features [N, F]
+            scales: Gaussian scales [N, 3]
+            rotations: Gaussian rotations [N, 4]
+            opacities: Gaussian opacities [N, 1]
+            batch_size: Batch size
         
         Returns:
-            pred_images: Predicted images [B, T, H, W, D]
+            rendered_images: Rendered images [B, T, H, W, D]
         """
-        # Simple placeholder: Add small noise to target images
-        # This allows the loss to be computed and backpropagated
-        noise = torch.randn_like(target_images) * 0.01
-        pred_images = target_images + noise
+        T, N, _ = motion_sequence.shape
         
-        return pred_images
+        # Render each time step
+        rendered_frames = []
+        for t in range(T):
+            # Get positions for this time step
+            positions_t = motion_sequence[t]  # [N, 3]
+            
+            # Render using Gaussian splatting
+            rendered_volume = self.renderer(
+                means=positions_t,
+                scales=scales,
+                rotations=rotations,
+                opacities=opacities,
+                features=features,
+            )  # [H, W, D, F]
+            
+            # Permute to [F, H, W, D] for consistency
+            rendered_volume = rendered_volume.permute(3, 0, 1, 2)
+            
+            rendered_frames.append(rendered_volume)
+        
+        # Stack frames: [T, F, H, W, D]
+        rendered_sequence = torch.stack(rendered_frames, dim=0)
+        
+        # Expand batch dimension and permute to [B, T, H, W, D]
+        # Assuming single feature (grayscale)
+        rendered_images = rendered_sequence[:, 0:1].unsqueeze(0).expand(batch_size, -1, -1, -1, -1)
+        rendered_images = rendered_images.squeeze(2)  # Remove feature dim: [B, T, H, W, D]
+        
+        return rendered_images
     
     def train_epoch(self, train_loader):
         """
