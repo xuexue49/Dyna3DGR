@@ -176,7 +176,9 @@ class Medical2DSliceRenderer(nn.Module):
         
         # Filter Gaussians near this slice (for efficiency)
         z_distances = torch.abs(means[:, 2] - slice_z)
-        max_distance = 3.0 * scales[:, 2].max()  # 3 sigma
+        # Estimate max distance from covariance
+        z_scales = torch.sqrt(covariances[:, 2, 2])  # sqrt of variance
+        max_distance = 3.0 * z_scales.max()  # 3 sigma
         near_mask = z_distances < max_distance
         
         if near_mask.sum() == 0:
