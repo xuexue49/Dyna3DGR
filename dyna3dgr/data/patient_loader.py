@@ -145,9 +145,14 @@ class PatientDataset(Dataset):
                 
                 for t, frame in enumerate(frames):
                     if seg_data.ndim == 4:
-                        frame['segmentation'] = seg_data[:, :, :, t]
+                        frame['segmentation'] = seg_data[:, :, :, t]  # [H, W, D]
                     elif seg_data.ndim == 3:
-                        frame['segmentation'] = seg_data[:, :, t]
+                        # Check if it's 3D volume or 2D+time
+                        if seg_data.shape[2] <= 20:  # 3D volume
+                            frame['segmentation'] = seg_data  # [H, W, D]
+                        else:  # 2D+time
+                            if t < seg_data.shape[2]:
+                                frame['segmentation'] = seg_data[:, :, t]  # [H, W]
         
         return frames
     
