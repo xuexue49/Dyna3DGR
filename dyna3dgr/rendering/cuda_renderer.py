@@ -68,8 +68,8 @@ class CUDAGaussianRenderer(nn.Module):
         
         # View matrix (world to camera)
         z_axis = torch.nn.functional.normalize(camera_position - look_at, dim=0)
-        x_axis = torch.nn.functional.normalize(torch.cross(up, z_axis), dim=0)
-        y_axis = torch.cross(z_axis, x_axis)
+        x_axis = torch.nn.functional.normalize(torch.cross(up, z_axis, dim=0), dim=0)
+        y_axis = torch.cross(z_axis, x_axis, dim=0)
         
         R = torch.stack([x_axis, y_axis, z_axis], dim=0)  # [3, 3]
         t = -R @ camera_position  # [3]
@@ -188,29 +188,47 @@ def create_orthographic_camera_for_slice(
     slice_z: float,
     image_size: tuple,  # (H, W)
     spacing: tuple = (1.0, 1.0, 1.0),  # (x, y, z)
+    normalized_coords: bool = True,  # Whether Gaussians use normalized [0,1] coords
 ):
     """
     Create camera parameters for orthographic rendering of a 2D slice.
     
     Args:
-        slice_z: Z position of the slice
+        slice_z: Z position of the slice (in voxel index)
         image_size: (H, W)
         spacing: Voxel spacing
+        normalized_coords: If True, assumes Gaussians are in [0, 1] range
     
     Returns:
         camera_position, look_at, up, fov_x, fov_y
     """
-    H, W = image_size
-    sx, sy, sz = spacing
+    H, W, D = image_size if len(image_size) == 3 else (*image_size, 1)
     
-    # Camera looks down the Z axis
-    camera_position = torch.tensor([W * sx / 2, H * sy / 2, slice_z + 10.0])
-    look_at = torch.tensor([W * sx / 2, H * sy / 2, slice_z])
-    up = torch.tensor([0.0, 1.0, 0.0])
-    
-    # FOV for orthographic-like projection
-    # Small FOV approximates orthographic
-    fov_x = 2 * math.atan(W * sx / (2 * 10.0))
-    fov_y = 2 * math.atan(H * sy / (2 * 10.0))
+    if normalized_coords:
+        # Gaussians are in [0, 1] normalized coordinates
+        # Convert slice index to normalized z
+        slice_z_norm = slice_z / max(D - 1, 1)
+        
+        # Camera looks at the center of the normalized volume
+        camera_distance = 2.0  # Distance from slice in normalized space
+        camera_position = torch.tensor([0.5, 0.5, slice_z_norm + camera_distance])
+        look_at = torch.tensor([0.5, 0.5, slice_z_norm])
+        up = torch.tensor([0.0, 1.0, 0.0])
+        
+        # FOV to cover [0, 1] range at the slice depth
+        # tan(fov/2) = (width/2) / distance
+        fov_x = 2 * math.atan(0.5 / camera_distance)  # Cover [0, 1] in x
+        fov_y = 2 * math.atan(0.5 / camera_distance)  # Cover [0, 1] in y
+    else:
+        # Gaussians are in physical voxel coordinates
+        sx, sy, sz = spacing
+        camera_distance = 10.0
+        
+        camera_position = torch.tensor([W * sx / 2, H * sy / 2, slice_z * sz + camera_distance])
+        look_at = torch.tensor([W * sx / 2, H * sy / 2, slice_z * sz])
+        up = torch.tensor([0.0, 1.0, 0.0])
+        
+        fov_x = 2 * math.atan(W * sx / (2 * camera_distance))
+        fov_y = 2 * math.atan(H * sy / (2 * camera_distance))
     
     return camera_position, look_at, up, fov_x, fov_y

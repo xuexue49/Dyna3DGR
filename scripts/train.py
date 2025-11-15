@@ -603,8 +603,9 @@ class Dyna3DGRTrainer:
                 H, W, D = self.image_size
                 camera_pos, look_at, up, fov_x, fov_y = create_orthographic_camera_for_slice(
                     slice_z=slice_idx,
-                    image_size=(H, W),
+                    image_size=(H, W, D),  # Pass full 3D size
                     spacing=(1.0, 1.0, 1.0),
+                    normalized_coords=True,  # Gaussians use [0, 1] coordinates
                 )
                 camera_pos = camera_pos.to(self.device)
                 look_at = look_at.to(self.device)
