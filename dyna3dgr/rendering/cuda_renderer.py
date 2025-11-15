@@ -151,8 +151,6 @@ class CUDAGaussianRenderer(nn.Module):
             sh_degree=0,  # No spherical harmonics, use precomputed colors
             campos=camera_center,
             prefiltered=False,
-            antialiasing=False,
-            debug=False,
         )
         
         rasterizer = GaussianRasterizer(raster_settings=raster_settings)
