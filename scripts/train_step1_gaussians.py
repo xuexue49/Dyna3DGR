@@ -144,6 +144,7 @@ class Step1GaussianTrainer:
         else:
             self.renderer = Medical2DSliceRenderer(
                 image_size=image_size[:2],
+                num_slices=image_size[2] if len(image_size) > 2 else 32,
                 chunk_size=self.config.get('chunk_size', 1000),
             ).to(self.device)
             print(f"  ✓ Initialized Medical2DSliceRenderer (single slice)")

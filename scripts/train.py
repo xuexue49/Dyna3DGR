@@ -182,11 +182,10 @@ class Dyna3DGRTrainer:
         )
         
         print(f"  Loaded {len(self.dataset)} frames")
-        print(f"  Image shape: {self.dataset.image_shape}")
         
         # Get ED frame for initialization
         self.ed_frame = self.dataset[0]
-        print(f"  ED frame shape: {self.ed_frame['image'].shape}")
+        print(f"  Image shape: {self.ed_frame['image'].shape}")
     
     def setup_models(self):
         """Setup models: Gaussians, Control Nodes, Deformation Network."""
@@ -294,8 +293,10 @@ class Dyna3DGRTrainer:
             ).to(self.device)
             print(f"  ✓ Initialized VolumeRenderer (complete 3D rendering)")
         else:
+            image_size_config = self.config.get('image_size', [128, 128, 32])
             self.renderer = Medical2DSliceRenderer(
-                image_size=tuple(self.config.get('image_size', [128, 128, 32])[:2]),
+                image_size=tuple(image_size_config[:2]),
+                num_slices=image_size_config[2] if len(image_size_config) > 2 else 32,
                 chunk_size=self.config.get('chunk_size', 1000),
             ).to(self.device)
             print(f"  ✓ Initialized Medical2DSliceRenderer (single slice)")
