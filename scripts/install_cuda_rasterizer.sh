@@ -13,9 +13,9 @@ if [ ! -d "submodules/diff-gaussian-rasterization" ]; then
     cd ..
 fi
 
-# Install
+# Install (use --no-build-isolation to use current environment's torch)
 cd submodules/diff-gaussian-rasterization
-pip install .
+pip install --no-build-isolation .
 cd ../..
 
 echo "✓ Installation complete!"
