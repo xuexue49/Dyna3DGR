@@ -295,12 +295,17 @@ def initialize_gaussians_from_point_cloud(
     gaussians = Gaussian3D(num_gaussians, feature_dim)
     
     # Initialize positions
-    gaussians._xyz.data = torch.from_numpy(points).float()
+    if isinstance(points, torch.Tensor):
+        gaussians._xyz.data = points.float()
+        points_np = points.cpu().numpy()
+    else:
+        gaussians._xyz.data = torch.from_numpy(points).float()
+        points_np = points
     
     # Estimate initial scale from nearest neighbors
     from scipy.spatial import cKDTree
-    tree = cKDTree(points)
-    distances, _ = tree.query(points, k=4)  # k=4 to exclude self
+    tree = cKDTree(points_np)
+    distances, _ = tree.query(points_np, k=4)  # k=4 to exclude self
     avg_distances = distances[:, 1:].mean(axis=1)  # Exclude self
     
     init_scale = torch.from_numpy(avg_distances).float().unsqueeze(1).repeat(1, 3)
