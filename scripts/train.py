@@ -631,7 +631,7 @@ class Dyna3DGRTrainer:
             
             # Reshape for loss computation: [T, H, W, D, F] -> [T*D, F, H, W]
             rendered_flat = rendered_volumes.permute(0, 3, 4, 1, 2).reshape(T*D, F, H, W)
-            gt_flat = gt_volumes.permute(0, 3, 4, 1, 2).reshape(T*gt_D, 1, gt_H, gt_W)
+            gt_flat = gt_volumes.permute(0, 2, 3, 1).unsqueeze(1).reshape(T*gt_D, 1, gt_H, gt_W)
             
             loss_dict = self.loss_fn(
                 pred_images=rendered_flat,
