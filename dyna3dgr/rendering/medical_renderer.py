@@ -353,7 +353,7 @@ class Medical2DSliceRenderer(nn.Module):
                 continue
             
             # Compute Mahalanobis distance
-            offset = grid_flat - mu_2d  # [H*W, 2]
+            offset = grid_flat - mu_2d.unsqueeze(0)  # [H*W, 2] - [1, 2]
             offset_transformed = torch.mm(offset, inv_sigma_2d)  # [H*W, 2]
             mahalanobis_dist = (offset * offset_transformed).sum(dim=1)  # [H*W]
             
