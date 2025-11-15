@@ -553,8 +553,8 @@ class Dyna3DGRTrainer:
             metrics: Dictionary of metrics
         """
         # Get data
-        images = batch['image'].to(self.device)  # [T, H, W, D]
-        timestamps = batch['timestamp'].to(self.device)  # [T]
+        images = batch['images'].to(self.device)  # [T, H, W, D]
+        timestamps = batch['timestamps'].to(self.device)  # [T]
         
         T = images.shape[0]
         
