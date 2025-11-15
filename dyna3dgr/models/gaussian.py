@@ -309,7 +309,10 @@ def initialize_gaussians_from_point_cloud(
     distances, _ = tree.query(points_np, k=4)  # k=4 to exclude self
     avg_distances = distances[:, 1:].mean(axis=1)  # Exclude self
     
-    init_scale = torch.from_numpy(avg_distances).float().unsqueeze(1).repeat(1, 3)
+    # Initialize scale: make Gaussians flatter in Z direction for slice rendering
+    init_scale_xy = torch.from_numpy(avg_distances).float().unsqueeze(1).repeat(1, 2)  # [N, 2]
+    init_scale_z = init_scale_xy * 0.3  # Z scale is 30% of XY scale (flatter)
+    init_scale = torch.cat([init_scale_xy, init_scale_z], dim=1)  # [N, 3]
     gaussians._scale.data = torch.log(init_scale)
     
     # Initialize features if provided
