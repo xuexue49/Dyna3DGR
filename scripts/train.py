@@ -230,7 +230,10 @@ class Dyna3DGRTrainer:
         
         # Convert normalized positions [0, 1] to voxel indices
         voxel_indices = (gaussian_positions * torch.tensor([H-1, W-1, D-1])).long()
-        voxel_indices = torch.clamp(voxel_indices, min=0, max=torch.tensor([H-1, W-1, D-1]))
+        # Clamp each dimension separately
+        voxel_indices[:, 0] = torch.clamp(voxel_indices[:, 0], min=0, max=H-1)
+        voxel_indices[:, 1] = torch.clamp(voxel_indices[:, 1], min=0, max=W-1)
+        voxel_indices[:, 2] = torch.clamp(voxel_indices[:, 2], min=0, max=D-1)
         
         # Sample intensities
         initial_features = ed_image[
