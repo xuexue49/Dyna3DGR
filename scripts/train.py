@@ -705,11 +705,12 @@ class Dyna3DGRTrainer:
         if self.use_volume_renderer:
             # Get actual dimensions from data
             T, H, W, D, F = rendered_volumes.shape
-            _, gt_H, gt_W, gt_D, _ = gt_volumes.shape
+            # gt_volumes is [T, H, W, D, 1]
             
             # Reshape for loss computation: [T, H, W, D, F] -> [T*D, F, H, W]
             rendered_flat = rendered_volumes.permute(0, 3, 4, 1, 2).reshape(T*D, F, H, W)
-            gt_flat = gt_volumes.permute(0, 2, 3, 1).unsqueeze(1).reshape(T*gt_D, 1, gt_H, gt_W)
+            # gt_volumes: [T, H, W, D, 1] -> [T, D, 1, H, W] -> [T*D, 1, H, W]
+            gt_flat = gt_volumes.permute(0, 3, 4, 1, 2).reshape(T*D, 1, H, W)
             
             loss_dict = self.loss_fn(
                 pred_images=rendered_flat,
