@@ -402,10 +402,10 @@ class Dyna3DGRTrainer:
         print("\nSetting up loss function...")
         
         self.loss_fn = Dyna3DGRLoss(
-            reconstruction_weight=self.config.get('reconstruction_weight', 1.0),
+            recon_weight=self.config.get('reconstruction_weight', 1.0),
             temporal_weight=self.config.get('temporal_weight', 0.1),
-            regularization_weight=self.config.get('regularization_weight', 0.01),
-            cycle_weight=self.config.get('cycle_weight', 0.1),
+            reg_weight=self.config.get('regularization_weight', 0.01),
+            cyclic_weight=self.config.get('cycle_weight', 0.1),
         ).to(self.device)
         
         print(f"  ✓ Initialized Dyna3DGRLoss")

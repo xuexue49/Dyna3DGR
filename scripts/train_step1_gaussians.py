@@ -187,10 +187,10 @@ class Step1GaussianTrainer:
     def setup_loss(self):
         """Setup loss function."""
         self.loss_fn = Dyna3DGRLoss(
-            reconstruction_weight=self.config.get('reconstruction_weight', 1.0),
+            recon_weight=self.config.get('reconstruction_weight', 1.0),
             temporal_weight=0.0,  # No temporal loss for static reconstruction
-            regularization_weight=self.config.get('regularization_weight', 0.01),
-            cycle_weight=0.0,  # No cycle loss for static reconstruction
+            reg_weight=self.config.get('regularization_weight', 0.01),
+            cyclic_weight=0.0,  # No cycle loss for static reconstruction
         ).to(self.device)
         
         print("\nLoss function:")
