@@ -616,7 +616,6 @@ class Dyna3DGRTrainer:
                     rotations=self.gaussians.rotation,
                     opacities=self.gaussians.opacity,
                     features=deformed_features,
-                    slice_position=slice_idx / images.shape[3],
                 )
                 
                 rendered_images.append(rendered_slice)
