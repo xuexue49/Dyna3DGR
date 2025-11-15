@@ -35,13 +35,19 @@ class PatientDataset(Dataset):
         
         Args:
             patient_dir: Directory containing patient data
-            image_size: Target image size (H, W)
+            image_size: Target image size (H, W) or (H, W, D)
             num_frames: Number of frames to sample (None = all)
             load_segmentation: Whether to load segmentation masks
             normalize: Whether to normalize intensities
         """
         self.patient_dir = Path(patient_dir)
-        self.image_size = image_size
+        # Handle both 2D (H, W) and 3D (H, W, D) image_size
+        if isinstance(image_size, (list, tuple)) and len(image_size) == 3:
+            self.image_size = tuple(image_size[:2])  # Use only H, W for 2D resizing
+            self.num_slices = image_size[2]
+        else:
+            self.image_size = tuple(image_size) if image_size else None
+            self.num_slices = None
         self.load_segmentation = load_segmentation
         self.normalize = normalize
         
