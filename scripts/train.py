@@ -229,17 +229,20 @@ class Dyna3DGRTrainer:
         H, W, D = ed_image.shape
         
         # Convert normalized positions [0, 1] to voxel indices
-        voxel_indices = (gaussian_positions * torch.tensor([H-1, W-1, D-1])).long()
+        # Note: gaussian_positions is [N, 3] with (x, y, z)
+        # ed_image is [H, W, D] which corresponds to (y, x, z)
+        # So we need to swap x and y when indexing
+        voxel_indices = (gaussian_positions * torch.tensor([W-1, H-1, D-1])).long()  # (x, y, z) -> (W, H, D)
         # Clamp each dimension separately
-        voxel_indices[:, 0] = torch.clamp(voxel_indices[:, 0], min=0, max=H-1)
-        voxel_indices[:, 1] = torch.clamp(voxel_indices[:, 1], min=0, max=W-1)
-        voxel_indices[:, 2] = torch.clamp(voxel_indices[:, 2], min=0, max=D-1)
+        voxel_indices[:, 0] = torch.clamp(voxel_indices[:, 0], min=0, max=W-1)  # x -> W
+        voxel_indices[:, 1] = torch.clamp(voxel_indices[:, 1], min=0, max=H-1)  # y -> H
+        voxel_indices[:, 2] = torch.clamp(voxel_indices[:, 2], min=0, max=D-1)  # z -> D
         
-        # Sample intensities
+        # Sample intensities: ed_image[y, x, z]
         initial_features = ed_image[
-            voxel_indices[:, 0],
-            voxel_indices[:, 1],
-            voxel_indices[:, 2]
+            voxel_indices[:, 1],  # y -> H (second dimension)
+            voxel_indices[:, 0],  # x -> W (first dimension)
+            voxel_indices[:, 2]   # z -> D (third dimension)
         ].unsqueeze(1)  # [N, 1]
         
         self.gaussians = initialize_gaussians_from_point_cloud(
