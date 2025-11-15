@@ -283,20 +283,31 @@ class Dyna3DGRTrainer:
         """Setup renderer."""
         print("\nInitializing renderer...")
         
+        # Get actual image size from data
+        sample = self.ed_frame
+        actual_shape = sample['image'].shape  # [H, W, D] or [H, W]
+        
+        if len(actual_shape) == 3:
+            image_size = actual_shape  # [H, W, D]
+        else:
+            # 2D image, use config for D
+            image_size = (*actual_shape, self.config.get('image_size', [128, 128, 32])[2])
+        
+        print(f"  Actual image size: {image_size}")
+        
         # Choose renderer based on configuration
         use_volume_renderer = self.config.get('use_volume_renderer', True)
         
         if use_volume_renderer:
             self.renderer = VolumeRenderer(
-                image_size=tuple(self.config.get('image_size', [128, 128, 32])),
+                image_size=tuple(image_size),
                 chunk_size=self.config.get('chunk_size', 1000),
             ).to(self.device)
             print(f"  ✓ Initialized VolumeRenderer (complete 3D rendering)")
         else:
-            image_size_config = self.config.get('image_size', [128, 128, 32])
             self.renderer = Medical2DSliceRenderer(
-                image_size=tuple(image_size_config[:2]),
-                num_slices=image_size_config[2] if len(image_size_config) > 2 else 32,
+                image_size=tuple(image_size[:2]),
+                num_slices=image_size[2] if len(image_size) > 2 else 32,
                 chunk_size=self.config.get('chunk_size', 1000),
             ).to(self.device)
             print(f"  ✓ Initialized Medical2DSliceRenderer (single slice)")
