@@ -335,7 +335,7 @@ class Medical2DSliceRenderer(nn.Module):
             
             # Conditional mean
             z_offset = slice_z - mu_z
-            mu_2d = mu_xy + (sigma_xy_z / (sigma_zz + 1e-6)) * z_offset
+            mu_2d = mu_xy + (sigma_xy_z.squeeze() / (sigma_zz.item() + 1e-6)) * z_offset
             
             # Conditional covariance
             sigma_2d = sigma_xy - torch.mm(sigma_xy_z, sigma_z_xy) / (sigma_zz + 1e-6)
