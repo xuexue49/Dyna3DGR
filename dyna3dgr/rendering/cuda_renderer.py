@@ -170,7 +170,7 @@ class CUDAGaussianRenderer(nn.Module):
         colors_precomp = torch.clamp(colors_precomp, 0.0, 1.0)
         
         # Rasterize
-        rendered_image, radii, _ = rasterizer(
+        rendered_image, radii = rasterizer(
             means3D=means,
             means2D=screenspace_points,
             shs=None,
