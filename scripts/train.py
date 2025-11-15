@@ -224,10 +224,26 @@ class Dyna3DGRTrainer:
                 normalize=True,
             )
         
+        # Sample features from ED image at Gaussian positions
+        ed_image = self.ed_frame['image']  # [H, W, D]
+        H, W, D = ed_image.shape
+        
+        # Convert normalized positions [0, 1] to voxel indices
+        voxel_indices = (gaussian_positions * torch.tensor([H-1, W-1, D-1])).long()
+        voxel_indices = torch.clamp(voxel_indices, min=0, max=torch.tensor([H-1, W-1, D-1]))
+        
+        # Sample intensities
+        initial_features = ed_image[
+            voxel_indices[:, 0],
+            voxel_indices[:, 1],
+            voxel_indices[:, 2]
+        ].unsqueeze(1)  # [N, 1]
+        
         self.gaussians = initialize_gaussians_from_point_cloud(
             points=gaussian_positions,
             num_gaussians=num_gaussians,
             feature_dim=1,  # Intensity
+            initial_features=initial_features,
         ).to(self.device)
         
         print(f"  ✓ Initialized {self.gaussians.num_points} Gaussians")

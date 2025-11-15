@@ -272,6 +272,7 @@ def initialize_gaussians_from_point_cloud(
     points: np.ndarray,
     num_gaussians: Optional[int] = None,
     feature_dim: int = 1,
+    initial_features: Optional[torch.Tensor] = None,
 ) -> Gaussian3D:
     """
     Initialize Gaussians from a point cloud.
@@ -310,5 +311,14 @@ def initialize_gaussians_from_point_cloud(
     
     init_scale = torch.from_numpy(avg_distances).float().unsqueeze(1).repeat(1, 3)
     gaussians._scale.data = torch.log(init_scale)
+    
+    # Initialize features if provided
+    if initial_features is not None:
+        if isinstance(initial_features, np.ndarray):
+            initial_features = torch.from_numpy(initial_features).float()
+        gaussians._features.data = initial_features
+    else:
+        # Default: initialize to small random values to avoid zero gradients
+        gaussians._features.data = torch.randn(num_gaussians, feature_dim) * 0.1 + 0.5
     
     return gaussians
