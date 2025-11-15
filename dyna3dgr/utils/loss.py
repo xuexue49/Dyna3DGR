@@ -31,6 +31,12 @@ class ReconstructionLoss(nn.Module):
         Returns:
             loss: scalar loss value
         """
+        # Handle 5D input [B, C, D, H, W] -> reshape to [B*D, C, H, W]
+        if pred.ndim == 5:
+            B, C, D, H, W = pred.shape
+            pred = pred.permute(0, 2, 1, 3, 4).reshape(B*D, C, H, W)
+            target = target.permute(0, 2, 1, 3, 4).reshape(B*D, C, H, W)
+        
         # L1 loss
         l1_loss = F.l1_loss(pred, target)
         
