@@ -611,10 +611,10 @@ class Dyna3DGRTrainer:
                 
                 # Render middle slice
                 rendered_slice = self.renderer(
-                    xyz=deformed_xyz,
-                    scale=deformed_scale,
-                    rotation=self.gaussians.rotation,
-                    opacity=self.gaussians.opacity,
+                    means=deformed_xyz,
+                    scales=deformed_scale,
+                    rotations=self.gaussians.rotation,
+                    opacities=self.gaussians.opacity,
                     features=deformed_features,
                     slice_position=slice_idx / images.shape[3],
                 )
