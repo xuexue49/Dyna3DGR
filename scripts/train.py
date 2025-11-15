@@ -46,6 +46,7 @@ from dyna3dgr.data import (
     initialize_uniform_grid,
 )
 from dyna3dgr.rendering import Medical2DSliceRenderer, VolumeRenderer, render_volume
+from dyna3dgr.rendering.cuda_renderer import CUDAGaussianRenderer, create_orthographic_camera_for_slice
 
 
 def parse_args():
@@ -296,14 +297,25 @@ class Dyna3DGRTrainer:
         print(f"  Actual image size: {image_size}")
         
         # Choose renderer based on configuration
+        use_cuda_rasterizer = self.config.get('use_cuda_rasterizer', False)
         use_volume_renderer = self.config.get('use_volume_renderer', True)
         
-        if use_volume_renderer:
+        if use_cuda_rasterizer:
+            # CUDA-accelerated rendering with diff-gaussian-rasterization
+            self.renderer = CUDAGaussianRenderer(
+                image_size=tuple(image_size[:2]),  # (H, W)
+                fov_x=0.8,  # Will be set dynamically per slice
+                bg_color=(0.0, 0.0, 0.0),
+            ).to(self.device)
+            print(f"  ✓ Initialized CUDAGaussianRenderer (CUDA-accelerated)")
+            self.use_cuda_rasterizer = True
+        elif use_volume_renderer:
             self.renderer = VolumeRenderer(
                 image_size=tuple(image_size),
                 chunk_size=self.config.get('chunk_size', 1000),
             ).to(self.device)
             print(f"  ✓ Initialized VolumeRenderer (complete 3D rendering)")
+            self.use_cuda_rasterizer = False
         else:
             self.renderer = Medical2DSliceRenderer(
                 image_size=tuple(image_size[:2]),
@@ -311,8 +323,10 @@ class Dyna3DGRTrainer:
                 chunk_size=self.config.get('chunk_size', 1000),
             ).to(self.device)
             print(f"  ✓ Initialized Medical2DSliceRenderer (single slice)")
+            self.use_cuda_rasterizer = False
         
         self.use_volume_renderer = use_volume_renderer
+        self.image_size = image_size
     
     def setup_optimizers(self):
         """
@@ -574,7 +588,51 @@ class Dyna3DGRTrainer:
             optimizer.zero_grad()
         
         # Render all frames
-        if self.use_volume_renderer:
+        if self.use_cuda_rasterizer:
+            # CUDA-accelerated rendering with perspective projection
+            rendered_images = []
+            slice_idx = images.shape[3] // 2
+            
+            for t_idx in range(T):
+                t = timestamps[t_idx:t_idx+1]  # [1]
+                
+                # Forward pass with deformation
+                deformed_xyz, deformed_scale, deformed_features = self.forward_with_deformation(t)
+                
+                # Create camera for orthographic slice rendering
+                H, W, D = self.image_size
+                camera_pos, look_at, up, fov_x, fov_y = create_orthographic_camera_for_slice(
+                    slice_z=slice_idx,
+                    image_size=(H, W),
+                    spacing=(1.0, 1.0, 1.0),
+                )
+                camera_pos = camera_pos.to(self.device)
+                look_at = look_at.to(self.device)
+                up = up.to(self.device)
+                
+                # Update FOV
+                self.renderer.fov_x = fov_x
+                self.renderer.fov_y = fov_y
+                
+                # Render slice with CUDA rasterizer
+                rendered_slice = self.renderer(
+                    means=deformed_xyz,
+                    scales=deformed_scale,
+                    rotations=self.gaussians.rotation,
+                    opacities=self.gaussians.opacity,
+                    features=deformed_features,
+                    camera_position=camera_pos,
+                    look_at=look_at,
+                    up=up,
+                )  # [3, H, W]
+                
+                # Convert to grayscale (take first channel)
+                rendered_slice = rendered_slice[0:1]  # [1, H, W]
+                rendered_images.append(rendered_slice)
+            
+            rendered_images = torch.stack(rendered_images, dim=0)  # [T, 1, H, W]
+            gt_images = images[:, :, :, slice_idx].unsqueeze(1)  # [T, 1, H, W]
+        elif self.use_volume_renderer:
             # Complete volume rendering
             rendered_volumes = []
             for t_idx in range(T):
@@ -636,6 +694,12 @@ class Dyna3DGRTrainer:
             loss_dict = self.loss_fn(
                 pred_images=rendered_flat,
                 target_images=gt_flat,
+            )
+        elif self.use_cuda_rasterizer:
+            # CUDA rasterizer already produces [T, 1, H, W]
+            loss_dict = self.loss_fn(
+                pred_images=rendered_images,  # [T, 1, H, W]
+                target_images=gt_images,  # [T, 1, H, W]
             )
         else:
             loss_dict = self.loss_fn(
