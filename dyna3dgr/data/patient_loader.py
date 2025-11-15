@@ -93,7 +93,7 @@ class PatientDataset(Dataset):
         
         # Get dimensions
         if data.ndim == 4:
-            # 4D: (H, W, D, T)
+            # 4D: (H, W, D, T) - full 3D+time volume
             H, W, D, T = data.shape
             frames = []
             for t in range(T):
@@ -103,15 +103,36 @@ class PatientDataset(Dataset):
                     'spacing': nifti.header.get_zooms()[:3],
                 })
         elif data.ndim == 3:
-            # 3D: (H, W, T) - 2D+time
-            H, W, T = data.shape
-            frames = []
-            for t in range(T):
-                frame_data = data[:, :, t]  # [H, W]
-                frames.append({
-                    'image': frame_data,
-                    'spacing': nifti.header.get_zooms()[:2],
-                })
+            # 3D: Could be (H, W, D) single volume or (H, W, T) 2D+time
+            # Check if this looks like a 3D volume or 2D sequence
+            # Heuristic: if last dimension is small (< 20), likely depth slices
+            # Otherwise, likely time frames
+            H, W, third_dim = data.shape
+            
+            # For ACDC, check if there's a 4D file we should use instead
+            parent_dir = nifti_path.parent
+            four_d_files = list(parent_dir.glob('*_4d.nii*'))
+            
+            if four_d_files and not str(nifti_path).endswith('_4d.nii.gz'):
+                # Found a 4D file, use that instead
+                return self._load_from_nifti(four_d_files[0])
+            
+            # If third_dim is small, treat as single 3D volume
+            if third_dim <= 20:
+                # Single 3D volume - create one frame
+                frames = [{
+                    'image': data,  # [H, W, D]
+                    'spacing': nifti.header.get_zooms()[:3],
+                }]
+            else:
+                # 2D+time sequence
+                frames = []
+                for t in range(third_dim):
+                    frame_data = data[:, :, t]  # [H, W]
+                    frames.append({
+                        'image': frame_data,
+                        'spacing': nifti.header.get_zooms()[:2],
+                    })
         else:
             raise ValueError(f"Unexpected NIfTI dimensions: {data.shape}")
         
