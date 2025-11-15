@@ -624,13 +624,13 @@ class Dyna3DGRTrainer:
             gt_flat = gt_volumes.permute(0, 3, 4, 1, 2).reshape(T*gt_D, 1, gt_H, gt_W)
             
             loss_dict = self.loss_fn(
-                rendered=rendered_flat,
-                target=gt_flat,
+                pred_images=rendered_flat,
+                target_images=gt_flat,
             )
         else:
             loss_dict = self.loss_fn(
-                rendered=rendered_images.unsqueeze(1),  # [T, 1, H, W]
-                target=gt_images.unsqueeze(1),  # [T, 1, H, W]
+                pred_images=rendered_images.unsqueeze(1),  # [T, 1, H, W]
+                target_images=gt_images.unsqueeze(1),  # [T, 1, H, W]
             )
         
         total_loss = loss_dict['total']
