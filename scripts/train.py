@@ -837,6 +837,10 @@ class Dyna3DGRTrainer:
                     'gaussians': self.gaussians.num_points,
                 })
                 
+                # Save visualization
+                if iteration % 100 == 0:
+                    self.save_visualization(batch, iteration)
+                
                 # Save checkpoint
                 if iteration % 1000 == 0 and iteration > 0:
                     self.save_checkpoint(f'iter_{iteration}.pth')
@@ -863,6 +867,103 @@ class Dyna3DGRTrainer:
             print(f"Final Gaussians: {self.gaussians.num_points}")
             print(f"Checkpoints saved to: {self.output_dir / 'checkpoints'}")
             print("="*60 + "\n")
+    
+    def save_visualization(self, batch: dict, iteration: int):
+        """Save visualization of rendered vs ground truth images."""
+        import matplotlib.pyplot as plt
+        import matplotlib
+        matplotlib.use('Agg')  # Non-interactive backend
+        
+        # Create visualization directory
+        vis_dir = self.output_dir / 'visualizations'
+        vis_dir.mkdir(exist_ok=True)
+        
+        with torch.no_grad():
+            images = batch['images'].to(self.device)  # [T, H, W, D]
+            timestamps = batch['timestamps'].to(self.device)  # [T]
+            T = images.shape[0]
+            
+            # Render first frame
+            t = timestamps[0:1]  # [1]
+            deformed_xyz, deformed_scale, deformed_features = self.forward_with_deformation(t)
+            
+            if self.use_cuda_rasterizer:
+                # CUDA renderer
+                slice_idx = images.shape[3] // 2
+                H, W, D = self.image_size
+                camera_pos, look_at, up, fov_x, fov_y = create_orthographic_camera_for_slice(
+                    slice_z=slice_idx,
+                    image_size=(H, W, D),
+                    spacing=(1.0, 1.0, 1.0),
+                    normalized_coords=True,
+                )
+                camera_pos = camera_pos.to(self.device)
+                look_at = look_at.to(self.device)
+                up = up.to(self.device)
+                self.renderer.fov_x = fov_x
+                self.renderer.fov_y = fov_y
+                
+                rendered = self.renderer(
+                    means=deformed_xyz,
+                    scales=deformed_scale,
+                    rotations=self.gaussians.rotation,
+                    opacities=self.gaussians.opacity,
+                    features=deformed_features,
+                    camera_position=camera_pos,
+                    look_at=look_at,
+                    up=up,
+                )[0]  # Take first channel [H, W]
+                gt = images[0, :, :, slice_idx]
+            elif self.use_volume_renderer:
+                # Volume renderer
+                rendered_volume = self.renderer(
+                    xyz=deformed_xyz,
+                    scale=deformed_scale,
+                    rotation=self.gaussians.rotation,
+                    opacity=self.gaussians.opacity,
+                    features=deformed_features,
+                )  # [H, W, D, 1]
+                slice_idx = images.shape[3] // 2
+                rendered = rendered_volume[:, :, slice_idx, 0]
+                gt = images[0, :, :, slice_idx]
+            else:
+                # Medical2DSliceRenderer
+                rendered = self.renderer(
+                    means=deformed_xyz,
+                    scales=deformed_scale,
+                    rotations=self.gaussians.rotation,
+                    opacities=self.gaussians.opacity,
+                    features=deformed_features,
+                )
+                slice_idx = images.shape[3] // 2
+                gt = images[0, :, :, slice_idx]
+            
+            # Convert to numpy
+            rendered_np = rendered.cpu().numpy()
+            gt_np = gt.cpu().numpy()
+            
+            # Create comparison figure
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+            # Rendered
+            axes[0].imshow(rendered_np, cmap='gray', vmin=0, vmax=1)
+            axes[0].set_title(f'Rendered (Iter {iteration})')
+            axes[0].axis('off')
+            
+            # Ground Truth
+            axes[1].imshow(gt_np, cmap='gray', vmin=0, vmax=1)
+            axes[1].set_title('Ground Truth')
+            axes[1].axis('off')
+            
+            # Difference
+            diff = np.abs(rendered_np - gt_np)
+            axes[2].imshow(diff, cmap='hot', vmin=0, vmax=1)
+            axes[2].set_title(f'Absolute Difference (Mean: {diff.mean():.4f})')
+            axes[2].axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(vis_dir / f'iter_{iteration:06d}.png', dpi=100, bbox_inches='tight')
+            plt.close(fig)
     
     def save_checkpoint(self, filename: str):
         """Save checkpoint."""
