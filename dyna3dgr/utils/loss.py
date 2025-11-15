@@ -35,6 +35,8 @@ class ReconstructionLoss(nn.Module):
         if pred.ndim == 5:
             B, C, D, H, W = pred.shape
             pred = pred.permute(0, 2, 1, 3, 4).reshape(B*D, C, H, W)
+        if target.ndim == 5:
+            B, C, D, H, W = target.shape
             target = target.permute(0, 2, 1, 3, 4).reshape(B*D, C, H, W)
         
         # L1 loss
