@@ -701,7 +701,7 @@ class Dyna3DGRTrainer:
         print("="*60 + "\n")
         
         # Progress bar
-        pbar = tqdm(range(self.max_iterations), desc='Training', dynamic_ncols=True, mininterval=1.0)
+        pbar = tqdm(range(self.max_iterations), desc='Training', dynamic_ncols=True, mininterval=1.0, file=sys.stderr, ncols=100)
         
         try:
             for iteration in pbar:
