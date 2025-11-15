@@ -272,6 +272,26 @@ class PatientDataset(Dataset):
         
         return sample
     
+    def get_sequence(self):
+        """Get all frames as a batch."""
+        batch = [self[i] for i in range(len(self))]
+        
+        # Stack into tensors
+        images = torch.stack([b['image'] for b in batch])  # [T, H, W, D] or [T, H, W]
+        timestamps = torch.tensor([b['timestamp'] for b in batch])
+        
+        result = {
+            'images': images,
+            'timestamps': timestamps,
+        }
+        
+        # Add segmentations if available
+        if 'segmentation' in batch[0]:
+            segs = torch.stack([b['segmentation'] for b in batch])
+            result['segmentations'] = segs
+        
+        return result
+    
     def _resize_2d(
         self,
         image: np.ndarray,
